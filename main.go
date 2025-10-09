@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 )
 
 type Request struct {
+	Name    string
 	Method  string
 	URL     string
 	Headers map[string]string
@@ -21,29 +23,68 @@ type Request struct {
 	Time    time.Time
 }
 
+type CollectionNode struct {
+	Name     string            `json:"name"`
+	IsFolder bool              `json:"is_folder"`
+	Request  *Request          `json:"request,omitempty"`
+	Children []*CollectionNode `json:"children,omitempty"`
+	Expanded bool              `json:"-"` // Dikecualikan dari JSON
+}
+
 type App struct {
-	app          *tview.Application
-	pages        *tview.Pages
-	methodDrop   *tview.DropDown
-	urlInput     *tview.InputField
-	authType     *tview.DropDown
-	authToken    *tview.InputField
-	authUser     *tview.InputField
-	authPass     *tview.InputField
-	authPanel    *tview.Flex
-	headersText  *tview.TextArea
-	bodyText     *tview.TextArea
-	responseText *tview.TextView
-	historyList  *tview.List
-	statusText   *tview.TextView
-	history      []Request
+	app             *tview.Application
+	rightPages      *tview.Pages
+	pages           *tview.Pages
+	methodDrop      *tview.DropDown
+	urlInput        *tview.InputField
+	authType        *tview.DropDown
+	authToken       *tview.InputField
+	authUser        *tview.InputField
+	authPass        *tview.InputField
+	authPanel       *tview.Flex
+	headersText     *tview.TextArea
+	bodyText        *tview.TextArea
+	responseText    *tview.TextView
+	historyList     *tview.List
+	collectionsTree *tview.TreeView
+	statusText      *tview.TextView
+	history         []Request
+	collectionsRoot *CollectionNode
+}
+
+const collectionsFile = "collections.json"
+
+func (a *App) saveCollections() {
+	data, err := json.MarshalIndent(a.collectionsRoot, "", "  ")
+	if err != nil {
+		// Mungkin bisa menampilkan error di status bar
+		return
+	}
+
+	_ = os.WriteFile(collectionsFile, data, 0644)
+}
+
+func (a *App) loadCollections() {
+	data, err := os.ReadFile(collectionsFile)
+	if err != nil {
+		return // File mungkin belum ada
+	}
+	_ = json.Unmarshal(data, &a.collectionsRoot)
 }
 
 func NewApp() *App {
-	return &App{
+	app := &App{
 		app:     tview.NewApplication(),
 		history: make([]Request, 0),
+		collectionsRoot: &CollectionNode{
+			Name:     "Collections",
+			IsFolder: true,
+			Expanded: true,
+		},
 	}
+	// Muat koleksi yang ada, jika tidak ada, root akan tetap ada
+	app.loadCollections()
+	return app
 }
 
 func (a *App) Init() {
@@ -64,7 +105,7 @@ func (a *App) Init() {
 
 	a.urlInput = tview.NewInputField().
 		SetLabel("URL: ").
-		SetText("https://jsonplaceholder.typicode.com/posts/1").
+		SetText("").
 		SetFieldBackgroundColor(tcell.ColorBlack)
 	a.urlInput.SetBorder(true).SetTitle("URL")
 
@@ -125,6 +166,12 @@ func (a *App) Init() {
 	})
 	clearBtn.SetBorder(true)
 
+	saveBtn := tview.NewButton("Save (F8)").SetSelectedFunc(func() {
+		a.showSaveRequestModal()
+	})
+	saveBtn.SetBorder(true)
+
+	buttonFlex.AddItem(saveBtn, 0, 1, false)
 	buttonFlex.AddItem(sendBtn, 0, 1, false)
 	buttonFlex.AddItem(clearBtn, 0, 1, false)
 
@@ -151,7 +198,7 @@ func (a *App) Init() {
 	a.responseText.SetBorder(true).SetTitle("Response")
 
 	// History
-	a.historyList = tview.NewList()
+	a.historyList = tview.NewList().ShowSecondaryText(false)
 	a.historyList.SetBorder(true).SetTitle("History (F7)")
 	a.historyList.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
 		if index < len(a.history) {
@@ -160,9 +207,49 @@ func (a *App) Init() {
 		}
 	})
 
+	// Collections
+	a.collectionsTree = tview.NewTreeView()
+	a.collectionsTree.SetBorder(true).SetTitle("Collections (F9, 'n' for new folder)")
+	a.populateCollectionsTree()
+	a.collectionsTree.SetSelectedFunc(func(node *tview.TreeNode) {
+		reference := node.GetReference()
+		if reference == nil {
+			return
+		}
+
+		collectionNode, ok := reference.(*CollectionNode)
+		if !ok {
+			return
+		}
+
+		if collectionNode.IsFolder {
+			// Expand atau collapse folder
+			node.SetExpanded(!node.IsExpanded())
+			collectionNode.Expanded = node.IsExpanded()
+		} else {
+			// Muat permintaan
+			if collectionNode.Request != nil {
+				a.loadRequest(*collectionNode.Request)
+			}
+		}
+	})
+	a.collectionsTree.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		// 'n' for "new folder"
+		if event.Key() == tcell.KeyRune && event.Rune() == 'n' {
+			a.showCreateFolderModal()
+			return nil
+		}
+		return event
+	})
+
+	// Right panel pages (History/Collections)
+	a.rightPages = tview.NewPages()
+	a.rightPages.AddPage("history", a.historyList, true, true)
+	a.rightPages.AddPage("collections", a.collectionsTree, true, false)
+
 	rightPanel.AddItem(a.statusText, 3, 0, false)
 	rightPanel.AddItem(a.responseText, 0, 2, false)
-	rightPanel.AddItem(a.historyList, 0, 1, false)
+	rightPanel.AddItem(a.rightPages, 0, 1, false)
 
 	// Main layout
 	mainFlex.AddItem(leftPanel, 0, 1, true)
@@ -180,6 +267,8 @@ func (a *App) Init() {
 [green]F5[-]     - Send Request
 [green]F6[-]     - Clear Form
 [green]F7[-]     - Focus History
+[green]F8[-]     - Save Request to Collection
+[green]F9[-]     - Focus Collections
 [green]F1[-]     - Show Help
 [green]Ctrl+C[-] - Quit Application
 [green]Tab[-]    - Navigate between fields
@@ -192,6 +281,7 @@ func (a *App) Init() {
 4. Add headers in JSON format (optional)
 5. Add request body for POST/PUT/PATCH (optional)
 6. Press F5 or click Send Request
+7. Press F8 to save the request to your collection
 7. View response in the right panel
 8. Access previous requests from History
 
@@ -217,6 +307,14 @@ Press Esc to close this help.`)
 			return nil
 		case tcell.KeyF7:
 			a.app.SetFocus(a.historyList)
+			a.rightPages.SwitchToPage("history")
+			return nil
+		case tcell.KeyF8:
+			a.showSaveRequestModal()
+			return nil
+		case tcell.KeyF9:
+			a.app.SetFocus(a.collectionsTree)
+			a.rightPages.SwitchToPage("collections")
 			return nil
 		case tcell.KeyF1:
 			a.pages.ShowPage("help")
@@ -229,6 +327,175 @@ Press Esc to close this help.`)
 	})
 
 	a.app.SetRoot(a.pages, true).EnableMouse(true).SetFocus(a.urlInput)
+}
+
+func (a *App) showSaveRequestModal() {
+	_, method := a.methodDrop.GetCurrentOption()
+	url := a.urlInput.GetText()
+
+	nameInput := tview.NewInputField().SetLabel("Request Name").SetText(fmt.Sprintf("%s %s", method, url)).SetFieldWidth(60)
+
+	form := tview.NewForm().
+		AddFormItem(nameInput).
+		AddButton("Save", func() {
+			name := nameInput.GetText()
+			a.saveCurrentRequest(name)
+			a.pages.RemovePage("saveModal")
+		}).
+		AddButton("Cancel", func() {
+			a.pages.RemovePage("saveModal")
+		})
+
+	form.SetBorder(true).SetTitle("Save Request to Collection")
+	modal := a.createModal(form, 80, 7)
+	a.app.SetFocus(nameInput)
+	a.pages.AddPage("saveModal", modal, true, true)
+}
+
+func (a *App) showCreateFolderModal() {
+	nameInput := tview.NewInputField().SetLabel("Folder Name").SetFieldWidth(50)
+
+	form := tview.NewForm().
+		AddFormItem(nameInput).
+		AddButton("Create", func() {
+			folderName := nameInput.GetText()
+			if folderName != "" {
+				a.createCollectionFolder(folderName)
+			}
+			a.pages.RemovePage("createFolderModal")
+		}).
+		AddButton("Cancel", func() {
+			a.pages.RemovePage("createFolderModal")
+		})
+
+	form.SetBorder(true).SetTitle("Create New Folder")
+	modal := a.createModal(form, 70, 7)
+	a.app.SetFocus(nameInput)
+	a.pages.AddPage("createFolderModal", modal, true, true)
+}
+
+func (a *App) createCollectionFolder(name string) {
+	selectedTreeNode := a.collectionsTree.GetCurrentNode()
+	if selectedTreeNode == nil {
+		return
+	}
+
+	// Find the parent CollectionNode where the new folder will be added
+	var parentData *CollectionNode
+	ref := selectedTreeNode.GetReference()
+	if ref != nil {
+		selectedData, ok := ref.(*CollectionNode)
+		if ok {
+			if selectedData.IsFolder {
+				// If a folder is selected, the new folder is a child of it
+				parentData = selectedData
+			} else {
+				// If a request is selected, find its parent in the data structure
+				parentData = a.findParentNode(a.collectionsRoot, selectedData)
+			}
+		}
+	}
+
+	if parentData == nil {
+		parentData = a.collectionsRoot // Default to root if no parent is found
+	}
+
+	newFolder := &CollectionNode{Name: name, IsFolder: true}
+	parentData.Children = append(parentData.Children, newFolder)
+	a.populateCollectionsTree()
+	a.saveCollections()
+}
+
+func (a *App) saveCurrentRequest(name string) {
+	_, method := a.methodDrop.GetCurrentOption()
+	url := a.urlInput.GetText()
+	headersText := a.headersText.GetText()
+	body := a.bodyText.GetText()
+
+	headers := make(map[string]string)
+	if headersText != "" {
+		_ = json.Unmarshal([]byte(headersText), &headers)
+	}
+
+	requestData := &Request{
+		Name:    name,
+		Method:  method,
+		URL:     url,
+		Headers: headers,
+		Body:    body,
+		Time:    time.Now(),
+	}
+
+	newNode := &CollectionNode{
+		Name:     name,
+		IsFolder: false,
+		Request:  requestData,
+	}
+
+	// Add to the currently selected folder or root
+	selectedTreeNode := a.collectionsTree.GetCurrentNode()
+	var parentData *CollectionNode
+	if selectedTreeNode != nil {
+		ref := selectedTreeNode.GetReference()
+		if ref != nil {
+			selectedData, ok := ref.(*CollectionNode)
+			if ok {
+				if selectedData.IsFolder {
+					parentData = selectedData
+				} else {
+					parentData = a.findParentNode(a.collectionsRoot, selectedData)
+				}
+			}
+		}
+	}
+
+	if parentData == nil {
+		parentData = a.collectionsRoot // Default to root
+	}
+
+	parentData.Children = append(parentData.Children, newNode)
+
+	a.populateCollectionsTree()
+	a.saveCollections()
+}
+
+func (a *App) populateCollectionsTree() {
+	rootNode := tview.NewTreeNode(a.collectionsRoot.Name).SetReference(a.collectionsRoot)
+	a.collectionsTree.SetRoot(rootNode).SetCurrentNode(rootNode)
+	a.addTreeNodes(rootNode, a.collectionsRoot.Children)
+	rootNode.SetExpanded(a.collectionsRoot.Expanded)
+}
+
+func (a *App) addTreeNodes(parent *tview.TreeNode, children []*CollectionNode) {
+	for _, childData := range children {
+		icon := "📄" // Ikon untuk request
+		if childData.IsFolder {
+			icon = "📁" // Ikon untuk folder
+		}
+		node := tview.NewTreeNode(fmt.Sprintf("%s %s", icon, childData.Name)).
+			SetReference(childData).
+			SetSelectable(true)
+
+		if childData.IsFolder {
+			a.addTreeNodes(node, childData.Children)
+		}
+		node.SetExpanded(childData.Expanded)
+		parent.AddChild(node)
+	}
+}
+
+func (a *App) findParentNode(root, target *CollectionNode) *CollectionNode {
+	for _, child := range root.Children {
+		if child == target {
+			return root
+		}
+		if child.IsFolder {
+			if parent := a.findParentNode(child, target); parent != nil {
+				return parent
+			}
+		}
+	}
+	return nil
 }
 
 func (a *App) updateAuthPanel(authType int) {
@@ -389,8 +656,8 @@ func (a *App) sendRequest() {
 	a.history = append([]Request{historyReq}, a.history...)
 
 	a.historyList.InsertItem(0,
-		fmt.Sprintf("%s %s", method, url),
-		historyReq.Time.Format("15:04:05"),
+		fmt.Sprintf("[%s] %s (%s)", method, url, historyReq.Time.Format("15:04:05")),
+		"",
 		0, nil)
 }
 
@@ -422,11 +689,15 @@ func (a *App) loadRequest(req Request) {
 
 	if len(req.Headers) > 0 {
 		headersJSON, _ := json.MarshalIndent(req.Headers, "", "  ")
-		a.headersText.SetText(string(headersJSON), true)
+		a.headersText.SetText(string(headersJSON), false)
+	} else {
+		a.headersText.SetText("", false)
 	}
 
 	if req.Body != "" {
-		a.bodyText.SetText(req.Body, true)
+		a.bodyText.SetText(req.Body, false)
+	} else {
+		a.bodyText.SetText("", false)
 	}
 
 	a.app.SetFocus(a.urlInput)
@@ -440,6 +711,7 @@ func main() {
 	app := NewApp()
 	app.Init()
 
+	defer app.saveCollections()
 	if err := app.Run(); err != nil {
 		panic(err)
 	}
