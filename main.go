@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -75,26 +76,59 @@ type App struct {
 	grpcStub           grpcdynamic.Stub
 	grpcConn           *grpc.ClientConn
 	grpcCurrentService string
+	grpcBodyCache      map[string]string // Cache untuk body request gRPC
 }
 
-const collectionsFile = "collections.json"
-
-func (a *App) saveCollections() {
-	data, err := json.MarshalIndent(a.collectionsRoot, "", "  ")
+// getConfigPath mengembalikan path absolut untuk file konfigurasi,
+// memastikan file tersebut disimpan di direktori konfigurasi pengguna yang sesuai.
+func getConfigPath(filename string) (string, error) {
+	configDir, err := os.UserConfigDir()
 	if err != nil {
-		// Mungkin bisa menampilkan error di status bar
-		return
+		return "", fmt.Errorf("could not get user config dir: %w", err)
 	}
 
-	_ = os.WriteFile(collectionsFile, data, 0644)
+	appConfigDir := filepath.Join(configDir, "myhttp")
+	if err := os.MkdirAll(appConfigDir, 0755); err != nil {
+		return "", fmt.Errorf("could not create app config dir: %w", err)
+	}
+
+	return filepath.Join(appConfigDir, filename), nil
+}
+
+func (a *App) saveCollections() {
+	path, err := getConfigPath("collections.json")
+	if err != nil {
+		return // Mungkin bisa log error
+	}
+	data, err := json.MarshalIndent(a.collectionsRoot, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0644)
+}
+
+func (a *App) saveGrpcCache() {
+	path, err := getConfigPath("grpc_cache.json")
+	if err != nil {
+		return
+	}
+	data, err := json.MarshalIndent(a.grpcBodyCache, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0644)
 }
 
 func (a *App) loadCollections() {
-	data, err := os.ReadFile(collectionsFile)
-	if err != nil {
-		return // File mungkin belum ada
-	}
+	path, _ := getConfigPath("collections.json")
+	data, _ := os.ReadFile(path)
 	_ = json.Unmarshal(data, &a.collectionsRoot)
+}
+
+func (a *App) loadGrpcCache() {
+	path, _ := getConfigPath("grpc_cache.json")
+	data, _ := os.ReadFile(path)
+	_ = json.Unmarshal(data, &a.grpcBodyCache)
 }
 
 func NewApp() *App {
@@ -106,9 +140,12 @@ func NewApp() *App {
 			IsFolder: true,
 			Expanded: true,
 		},
+		grpcBodyCache: make(map[string]string),
 	}
 	// Muat koleksi yang ada, jika tidak ada, root akan tetap ada
 	app.loadCollections()
+	// Muat cache gRPC yang ada
+	app.loadGrpcCache()
 	return app
 }
 
@@ -422,10 +459,17 @@ func (a *App) createGrpcPage() {
 		}
 		// Simpan service/method yang dipilih
 		if serviceName, ok := ref.(string); ok && len(node.GetChildren()) == 0 {
+			// 1. Simpan body dari method sebelumnya (jika ada) ke cache
+			if a.grpcCurrentService != "" {
+				a.grpcBodyCache[a.grpcCurrentService] = a.grpcRequestBody.GetText()
+			}
+
+			// 2. Atur method baru sebagai yang aktif
 			a.grpcCurrentService = serviceName
 			a.grpcStatusText.SetText(fmt.Sprintf("Selected: [green]%s", serviceName))
 			a.grpcResponseView.SetText("") // Hapus respons sebelumnya
-			a.generateGrpcBodyTemplate(serviceName)
+			// 3. Buat template untuk method baru, gunakan body dari cache jika ada
+			a.generateGrpcBodyTemplate(serviceName, a.grpcBodyCache[serviceName])
 		} else {
 			// Jika yang dipilih adalah folder (service), buka/tutup saja
 			node.SetExpanded(!node.IsExpanded())
@@ -456,7 +500,7 @@ func (a *App) createGrpcPage() {
 	a.rootPages.AddPage("grpc", grpcFlex, true, false)
 }
 
-func (a *App) generateGrpcBodyTemplate(fullMethodName string) {
+func (a *App) generateGrpcBodyTemplate(fullMethodName, existingBody string) {
 	if a.grpcReflectClient == nil {
 		return
 	}
@@ -485,8 +529,15 @@ func (a *App) generateGrpcBodyTemplate(fullMethodName string) {
 
 		// Gunakan .Unwrap() untuk mendapatkan deskriptor API baru yang kompatibel.
 		newReqType := reqType.Unwrap().(protoreflect.MessageDescriptor)
-		templateMap := buildTemplateMap(newReqType)
-		jsonTemplate, err := json.MarshalIndent(templateMap, "", "  ")
+
+		// Gunakan body dari cache (atau string kosong jika belum ada)
+		var existingData map[string]interface{}
+		if err := json.Unmarshal([]byte(existingBody), &existingData); err != nil {
+			existingData = make(map[string]interface{}) // Jika parse gagal, mulai dengan map kosong
+		}
+
+		mergedMap := buildTemplateMap(newReqType, existingData)
+		jsonTemplate, err := json.MarshalIndent(mergedMap, "", "  ")
 		if err != nil {
 			a.app.QueueUpdateDraw(func() {
 				a.grpcRequestBody.SetText(fmt.Sprintf("/* could not marshal template: %v */", err), false)
@@ -507,8 +558,8 @@ func (a *App) generateGrpcBodyTemplate(fullMethodName string) {
 
 // buildTemplateMap secara rekursif membuat map[string]interface{} dari deskriptor pesan Protobuf.
 // Ini memastikan semua field disertakan dalam template JSON, tidak seperti marshalling pesan kosong.
-func buildTemplateMap(md protoreflect.MessageDescriptor) map[string]interface{} {
-	// Hindari rekursi tak terbatas pada tipe well-known seperti google.protobuf.Any
+func buildTemplateMap(md protoreflect.MessageDescriptor, existingData map[string]interface{}) map[string]interface{} {
+	// Hindari rekursi tak terbatas pada tipe well-known
 	if md.FullName() == "google.protobuf.Any" {
 		return map[string]interface{}{
 			"@type": "type.googleapis.com/your.Type",
@@ -522,14 +573,30 @@ func buildTemplateMap(md protoreflect.MessageDescriptor) map[string]interface{} 
 		field := fields.Get(i)
 		fieldName := string(field.JSONName())
 
-		if field.IsList() {
-			template[fieldName] = []interface{}{}
-		} else if field.IsMap() {
-			template[fieldName] = make(map[string]interface{})
-		} else if field.Kind() == protoreflect.MessageKind {
-			template[fieldName] = buildTemplateMap(field.Message())
+		if existingValue, ok := existingData[fieldName]; ok {
+			// Nilai sudah ada, pertahankan
+			if field.Kind() == protoreflect.MessageKind && !field.IsList() && !field.IsMap() {
+				// Untuk sub-pesan, lakukan rekursi dengan data yang ada
+				if subMap, isMap := existingValue.(map[string]interface{}); isMap {
+					template[fieldName] = buildTemplateMap(field.Message(), subMap)
+				} else {
+					// Tipe tidak cocok, gunakan nilai yang ada apa adanya
+					template[fieldName] = existingValue
+				}
+			} else {
+				template[fieldName] = existingValue
+			}
 		} else {
-			template[fieldName] = getZeroValue(field)
+			// Nilai belum ada, buat template default
+			if field.IsList() {
+				template[fieldName] = []interface{}{}
+			} else if field.IsMap() {
+				template[fieldName] = make(map[string]interface{})
+			} else if field.Kind() == protoreflect.MessageKind {
+				template[fieldName] = buildTemplateMap(field.Message(), nil)
+			} else {
+				template[fieldName] = getZeroValue(field)
+			}
 		}
 	}
 	// Jika map kosong setelah iterasi (misalnya untuk google.protobuf.Empty), kembalikan nil
@@ -1102,7 +1169,9 @@ func main() {
 	app := NewApp()
 	app.Init()
 
-	defer app.saveCollections() // Ini hanya menyimpan koleksi HTTP
+	// Simpan state ke file saat aplikasi keluar
+	defer app.saveCollections()
+	defer app.saveGrpcCache()
 	if err := app.Run(); err != nil {
 		panic(err)
 	}
