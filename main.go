@@ -87,6 +87,7 @@ type App struct {
 	grpcCurrentService   string
 	grpcBodyCache        map[string]string // Cache untuk body request gRPC
 	explorerPanelVisible bool
+	isLoadingRequest     bool // Flag untuk mencegah side-effect saat memuat request
 }
 
 // getConfigPath mengembalikan path absolut untuk file konfigurasi,
@@ -263,13 +264,22 @@ func (a *App) Init() {
 	// Body
 	a.bodyText = tview.NewTextArea().
 		SetPlaceholder("Request Body (for POST, PUT, PATCH)")
-	a.bodyText.SetBorder(true).SetTitle("Body")
 	a.bodyText.SetBackgroundColor(tcell.ColorBlack)
+	httpBodyLayout := tview.NewFlex().SetDirection(tview.FlexRow)
+	httpBeautifyBtn := tview.NewButton("Beautify").SetSelectedFunc(func() {
+		a.beautifyJSON(a.bodyText)
+	})
+	httpClearBtn := tview.NewButton("Clear").SetSelectedFunc(func() {
+		a.bodyText.SetText("", true)
+	})
+	httpBodyButtons := tview.NewFlex().AddItem(tview.NewBox(), 0, 1, false).AddItem(httpBeautifyBtn, 10, 0, false).AddItem(httpClearBtn, 7, 0, false)
+	httpBodyLayout.AddItem(httpBodyButtons, 1, 0, false).AddItem(a.bodyText, 0, 1, false)
+	httpBodyLayout.SetBorder(true).SetTitle(" Body ")
 
 	leftPanel.AddItem(topFlex, 3, 0, false)
 	leftPanel.AddItem(a.authPanel, 3, 0, false)
 	leftPanel.AddItem(a.headersText, 0, 1, false)
-	leftPanel.AddItem(a.bodyText, 0, 1, false)
+	leftPanel.AddItem(httpBodyLayout, 0, 1, false)
 
 	// Right panel - Response and History
 	a.httpRightPanel = tview.NewFlex().SetDirection(tview.FlexRow)
@@ -533,8 +543,7 @@ func (a *App) createGrpcPage() {
 			a.grpcCurrentService = serviceName
 			a.grpcStatusText.SetText(fmt.Sprintf("Selected: [green]%s", serviceName))
 			a.grpcResponseView.SetText("") // Hapus respons sebelumnya
-			// 3. Buat template untuk method baru, gunakan body dari cache jika ada
-			a.generateGrpcBodyTemplate(serviceName, a.grpcBodyCache[serviceName])
+			// Biarkan request body tidak berubah saat memilih method baru.
 		} else {
 			// Jika yang dipilih adalah folder (service), buka/tutup saja
 			node.SetExpanded(!node.IsExpanded())
@@ -559,10 +568,24 @@ func (a *App) createGrpcPage() {
 	bottomRow := tview.NewFlex()
 	middlePanel := tview.NewFlex().SetDirection(tview.FlexRow)
 	a.grpcRequestMeta = tview.NewTextArea().SetPlaceholder("Metadata (JSON format)...")
-	a.grpcRequestMeta.SetBorder(true).SetTitle("Metadata")
+	a.grpcRequestMeta.SetBorder(true).SetTitle(" Metadata ")
 	a.grpcRequestBody = tview.NewTextArea().SetPlaceholder("Select a service method to see the request body template...")
-	a.grpcRequestBody.SetBorder(true).SetTitle("Request Body")
-	middlePanel.AddItem(a.grpcRequestMeta, 0, 1, false).AddItem(a.grpcRequestBody, 0, 2, false)
+
+	// Buat layout untuk body dengan tombol generate template
+	bodyLayout := tview.NewFlex().SetDirection(tview.FlexRow)
+	grpcGenerateBtn := tview.NewButton("Generate").SetSelectedFunc(func() {
+		a.generateGrpcBodyTemplate(a.grpcCurrentService, a.grpcRequestBody.GetText())
+	})
+	grpcBeautifyBtn := tview.NewButton("Beautify").SetSelectedFunc(func() {
+		a.beautifyJSON(a.grpcRequestBody)
+	})
+	grpcClearBtn := tview.NewButton("Clear").SetSelectedFunc(func() {
+		a.grpcRequestBody.SetText("", true)
+	})
+	grpcBodyButtons := tview.NewFlex().AddItem(tview.NewBox(), 0, 1, false).AddItem(grpcGenerateBtn, 10, 0, false).AddItem(grpcBeautifyBtn, 10, 0, false).AddItem(grpcClearBtn, 7, 0, false)
+	bodyLayout.AddItem(grpcBodyButtons, 1, 0, false).AddItem(a.grpcRequestBody, 0, 1, false)
+	bodyLayout.SetBorder(true).SetTitle(" Request Body ")
+	middlePanel.AddItem(a.grpcRequestMeta, 0, 1, false).AddItem(bodyLayout, 0, 2, false)
 
 	a.grpcResponseView = tview.NewTextView().SetDynamicColors(true).SetScrollable(true).SetWordWrap(true)
 	a.grpcResponseView.SetBorder(true).SetTitle("Response")
@@ -574,7 +597,7 @@ func (a *App) createGrpcPage() {
 }
 
 func (a *App) generateGrpcBodyTemplate(fullMethodName, existingBody string) {
-	if a.grpcReflectClient == nil {
+	if a.grpcReflectClient == nil || fullMethodName == "" {
 		return
 	}
 
@@ -612,9 +635,8 @@ func (a *App) generateGrpcBodyTemplate(fullMethodName, existingBody string) {
 		mergedMap := buildTemplateMap(newReqType, existingData)
 		jsonTemplate, err := json.MarshalIndent(mergedMap, "", "  ")
 		if err != nil {
-			a.app.QueueUpdateDraw(func() {
-				a.grpcRequestBody.SetText(fmt.Sprintf("/* could not marshal template: %v */", err), false)
-			})
+			// Tidak perlu update UI untuk error ini, cukup log
+			log.Printf("ERROR: could not marshal template: %v", err)
 			return
 		}
 
@@ -630,16 +652,7 @@ func (a *App) generateGrpcBodyTemplate(fullMethodName, existingBody string) {
 }
 
 // buildTemplateMap secara rekursif membuat map[string]interface{} dari deskriptor pesan Protobuf.
-// Ini memastikan semua field disertakan dalam template JSON, tidak seperti marshalling pesan kosong.
 func buildTemplateMap(md protoreflect.MessageDescriptor, existingData map[string]interface{}) map[string]interface{} {
-	// Hindari rekursi tak terbatas pada tipe well-known
-	if md.FullName() == "google.protobuf.Any" {
-		return map[string]interface{}{
-			"@type": "type.googleapis.com/your.Type",
-			"value": "...",
-		}
-	}
-
 	template := make(map[string]interface{})
 	fields := md.Fields()
 	for i := 0; i < fields.Len(); i++ {
@@ -647,35 +660,30 @@ func buildTemplateMap(md protoreflect.MessageDescriptor, existingData map[string
 		fieldName := string(field.JSONName())
 
 		if existingValue, ok := existingData[fieldName]; ok {
-			// Nilai sudah ada, pertahankan
+			// Nilai sudah ada, pertahankan.
+			// Jika ini adalah sub-pesan, kita lakukan rekursi untuk menggabungkan nilai di dalamnya.
 			if field.Kind() == protoreflect.MessageKind && !field.IsList() && !field.IsMap() {
-				// Untuk sub-pesan, lakukan rekursi dengan data yang ada
 				if subMap, isMap := existingValue.(map[string]interface{}); isMap {
 					template[fieldName] = buildTemplateMap(field.Message(), subMap)
 				} else {
-					// Tipe tidak cocok, gunakan nilai yang ada apa adanya
-					template[fieldName] = existingValue
+					template[fieldName] = existingValue // Tipe tidak cocok, gunakan apa adanya.
 				}
 			} else {
 				template[fieldName] = existingValue
 			}
 		} else {
-			// Nilai belum ada, buat template default
+			// Nilai belum ada, buat template default (nilai nol).
 			if field.IsList() {
 				template[fieldName] = []interface{}{}
 			} else if field.IsMap() {
 				template[fieldName] = make(map[string]interface{})
 			} else if field.Kind() == protoreflect.MessageKind {
-				template[fieldName] = buildTemplateMap(field.Message(), nil)
+				// Untuk sub-pesan, panggil rekursif dengan data kosong.
+				template[fieldName] = buildTemplateMap(field.Message(), make(map[string]interface{}))
 			} else {
 				template[fieldName] = getZeroValue(field)
 			}
 		}
-	}
-	// Jika map kosong setelah iterasi (misalnya untuk google.protobuf.Empty), kembalikan nil
-	// agar json.MarshalIndent menghasilkan "null" yang bisa kita tangani.
-	if len(template) == 0 {
-		return nil
 	}
 	return template
 }
@@ -1375,16 +1383,9 @@ func (a *App) loadGrpcRequest(req Request) {
 	// Pindah ke halaman gRPC
 	a.rootPages.SwitchToPage("grpc")
 
-	// 1. Isi field dari data yang tersimpan
-	a.grpcServerInput.SetText(req.GrpcServer)
-	a.grpcRequestMeta.SetText(req.GrpcMetadata, false)
-	a.grpcRequestBody.SetText(req.Body, false)
-
-	// 2. Perbarui status dan service yang aktif
-	a.grpcCurrentService = req.GrpcMethod
-	if a.grpcCurrentService != "" {
-		a.grpcStatusText.SetText(fmt.Sprintf("Selected: [green]%s", a.grpcCurrentService))
-	}
+	// Set flag untuk menandakan kita sedang memuat.
+	a.isLoadingRequest = true
+	// Pastikan flag di-reset setelah semua operasi (termasuk asinkron) selesai.
 
 	// 3. Simpan body yang dimuat ke cache agar tidak hilang saat beralih
 	if req.GrpcMethod != "" {
@@ -1392,11 +1393,12 @@ func (a *App) loadGrpcRequest(req Request) {
 	}
 
 	// 4. Definisikan callback yang akan dijalankan setelah koneksi berhasil
+	// Callback ini akan memilih node DAN mengisi data setelah tree siap.
 	onConnectSuccess := func() {
-		if req.GrpcMethod == "" {
-			return
-		}
+		// Pastikan flag di-reset di akhir callback ini.
+		defer func() { a.isLoadingRequest = false }()
 
+		a.grpcCurrentService = req.GrpcMethod
 		// Cari node di tree yang sesuai dengan method yang disimpan
 		var targetNode *tview.TreeNode
 		a.grpcServiceTree.GetRoot().Walk(func(node, parent *tview.TreeNode) bool {
@@ -1412,12 +1414,33 @@ func (a *App) loadGrpcRequest(req Request) {
 		// Jika ditemukan, pilih node tersebut
 		if targetNode != nil {
 			a.grpcServiceTree.SetCurrentNode(targetNode)
+			// PENTING: Isi body dan metadata SETELAH node dipilih untuk menghindari penimpaan.
+			a.grpcRequestMeta.SetText(req.GrpcMetadata, false)
+			a.grpcRequestBody.SetText(req.Body, false)
+			a.grpcStatusText.SetText(fmt.Sprintf("Selected: [green]%s", a.grpcCurrentService))
 		}
 	}
 
+	a.grpcServerInput.SetText(req.GrpcServer)
 	// 5. Panggil grpcConnect dengan callback untuk otomatis terhubung dan memilih method
 	a.grpcConnect(onConnectSuccess)
 	a.app.SetFocus(a.grpcServerInput)
+}
+
+func (a *App) beautifyJSON(textArea *tview.TextArea) {
+	currentText := textArea.GetText()
+	if currentText == "" {
+		return
+	}
+
+	var prettyJSON bytes.Buffer
+	err := json.Indent(&prettyJSON, []byte(currentText), "", "  ")
+	if err != nil {
+		// Jika gagal, jangan ubah teksnya. Mungkin bisa tambahkan notifikasi error.
+		log.Printf("WARN: Failed to beautify JSON: %v", err)
+		return
+	}
+	textArea.SetText(prettyJSON.String(), false)
 }
 
 func (a *App) toggleExplorerPanel() {
