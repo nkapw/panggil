@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,12 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
+
+	"github.com/jhump/protoreflect/dynamic/grpcdynamic"
+	"github.com/jhump/protoreflect/grpcreflect"
 )
 
 type Request struct {
@@ -33,6 +40,7 @@ type CollectionNode struct {
 
 type App struct {
 	app             *tview.Application
+	rootPages       *tview.Pages // Halaman utama untuk beralih antara HTTP dan gRPC
 	rightPages      *tview.Pages
 	pages           *tview.Pages
 	methodDrop      *tview.DropDown
@@ -50,6 +58,19 @@ type App struct {
 	statusText      *tview.TextView
 	history         []Request
 	collectionsRoot *CollectionNode
+
+	// gRPC components
+	grpcPages          *tview.Pages
+	grpcServerInput    *tview.InputField
+	grpcServiceTree    *tview.TreeView
+	grpcRequestMeta    *tview.TextArea
+	grpcRequestBody    *tview.TextArea
+	grpcResponseView   *tview.TextView
+	grpcStatusText     *tview.TextView
+	grpcReflectClient  *grpcreflect.Client
+	grpcStub           grpcdynamic.Stub
+	grpcConn           *grpc.ClientConn
+	grpcCurrentService string
 }
 
 const collectionsFile = "collections.json"
@@ -90,6 +111,11 @@ func NewApp() *App {
 func (a *App) Init() {
 	// Main layout
 	mainFlex := tview.NewFlex()
+
+	// Root pages untuk switch HTTP/gRPC
+	a.rootPages = tview.NewPages()
+	a.app.SetRoot(a.rootPages, true).EnableMouse(true)
+	a.rootPages.AddPage("http", mainFlex, true, true)
 
 	// Left panel - Request
 	leftPanel := tview.NewFlex().SetDirection(tview.FlexRow)
@@ -259,6 +285,13 @@ func (a *App) Init() {
 	a.pages = tview.NewPages()
 	a.pages.AddPage("main", mainFlex, true, true)
 
+	// Buat halaman gRPC
+	a.createGrpcPage()
+
+	// Tambahkan header/switcher di atas
+	switcher := a.createModeSwitcher()
+	rootFlex := tview.NewFlex().SetDirection(tview.FlexRow).AddItem(switcher, 1, 0, false).AddItem(a.rootPages, 0, 1, true)
+
 	// Help modal
 	helpText := tview.NewTextView().
 		SetDynamicColors(true).
@@ -269,6 +302,7 @@ func (a *App) Init() {
 [green]F7[-]     - Focus History
 [green]F8[-]     - Save Request to Collection
 [green]F9[-]     - Focus Collections
+[green]F12[-]    - Switch HTTP/gRPC Mode
 [green]F1[-]     - Show Help
 [green]Ctrl+C[-] - Quit Application
 [green]Tab[-]    - Navigate between fields
@@ -319,6 +353,9 @@ Press Esc to close this help.`)
 		case tcell.KeyF1:
 			a.pages.ShowPage("help")
 			return nil
+		case tcell.KeyF12:
+			a.switchMode()
+			return nil
 		case tcell.KeyEsc:
 			a.pages.HidePage("help")
 			return nil
@@ -326,7 +363,162 @@ Press Esc to close this help.`)
 		return event
 	})
 
-	a.app.SetRoot(a.pages, true).EnableMouse(true).SetFocus(a.urlInput)
+	a.app.SetRoot(rootFlex, true)
+	a.app.SetFocus(a.urlInput)
+}
+
+func (a *App) createModeSwitcher() tview.Primitive {
+	textView := tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignCenter).
+		SetText("HTTP Client [yellow](F12 to switch)[-]")
+
+	a.rootPages.SetChangedFunc(func() {
+		page, _ := a.rootPages.GetFrontPage()
+		if page == "http" {
+			textView.SetText("HTTP Client [yellow](F12 to switch)[-]")
+		} else {
+			textView.SetText("gRPC Client [yellow](F12 to switch)[-]")
+		}
+	})
+	return textView
+}
+
+func (a *App) switchMode() {
+	currentPage, _ := a.rootPages.GetFrontPage()
+	if currentPage == "http" {
+		a.rootPages.SwitchToPage("grpc")
+		a.app.SetFocus(a.grpcServerInput)
+	} else {
+		a.rootPages.SwitchToPage("http")
+		a.app.SetFocus(a.urlInput)
+	}
+}
+
+func (a *App) createGrpcPage() {
+	// Layout utama gRPC
+	grpcFlex := tview.NewFlex()
+
+	// Panel Kiri: Server & Services
+	leftPanel := tview.NewFlex().SetDirection(tview.FlexRow)
+	serverInputFlex := tview.NewFlex()
+	a.grpcServerInput = tview.NewInputField().SetLabel("Server: ").SetText("localhost:8081")
+	connectBtn := tview.NewButton("Connect").SetSelectedFunc(a.grpcConnect)
+	serverInputFlex.AddItem(a.grpcServerInput, 0, 1, true).AddItem(connectBtn, 10, 0, false)
+
+	a.grpcServiceTree = tview.NewTreeView()
+	a.grpcServiceTree.SetBorder(true).SetTitle("Services")
+	a.grpcServiceTree.SetSelectedFunc(func(node *tview.TreeNode) {
+		ref := node.GetReference()
+		if ref == nil {
+			return
+		}
+		// Simpan service/method yang dipilih
+		if serviceName, ok := ref.(string); ok {
+			a.grpcCurrentService = serviceName
+			a.grpcStatusText.SetText(fmt.Sprintf("Selected: [green]%s", serviceName))
+		}
+	})
+
+	leftPanel.AddItem(serverInputFlex, 1, 0, true)
+	leftPanel.AddItem(a.grpcServiceTree, 0, 1, false)
+
+	// Panel Tengah: Request
+	middlePanel := tview.NewFlex().SetDirection(tview.FlexRow)
+	a.grpcRequestMeta = tview.NewTextArea().SetPlaceholder("Metadata (JSON format)...")
+	a.grpcRequestMeta.SetBorder(true).SetTitle("Metadata")
+	a.grpcRequestBody = tview.NewTextArea().SetPlaceholder("Request Body (JSON format)...")
+	a.grpcRequestBody.SetBorder(true).SetTitle("Request Body")
+	sendGrpcBtn := tview.NewButton("Send (F5)").SetSelectedFunc(a.sendGrpcRequest)
+	middlePanel.AddItem(a.grpcRequestMeta, 0, 1, false).AddItem(a.grpcRequestBody, 0, 2, false).AddItem(sendGrpcBtn, 1, 0, false)
+
+	// Panel Kanan: Response
+	rightPanel := tview.NewFlex().SetDirection(tview.FlexRow)
+	a.grpcStatusText = tview.NewTextView().SetDynamicColors(true).SetText("[yellow]Not connected")
+	a.grpcStatusText.SetBorder(true).SetTitle("Status")
+	a.grpcResponseView = tview.NewTextView().SetDynamicColors(true).SetScrollable(true).SetWordWrap(true)
+	a.grpcResponseView.SetBorder(true).SetTitle("Response")
+	rightPanel.AddItem(a.grpcStatusText, 3, 0, false).AddItem(a.grpcResponseView, 0, 1, false)
+
+	grpcFlex.AddItem(leftPanel, 30, 0, true).AddItem(middlePanel, 0, 1, false).AddItem(rightPanel, 0, 1, false)
+	a.rootPages.AddPage("grpc", grpcFlex, true, false)
+}
+
+func (a *App) grpcConnect() {
+	serverAddr := a.grpcServerInput.GetText()
+	if serverAddr == "" {
+		a.grpcStatusText.SetText("[red]Server address is required")
+		return
+	}
+
+	// Update status di UI dan jalankan koneksi di goroutine agar tidak hang
+	a.grpcStatusText.SetText(fmt.Sprintf("[yellow]Connecting to %s...", serverAddr))
+
+	go func() {
+		// Bersihkan koneksi lama jika ada
+		if a.grpcConn != nil {
+			a.grpcConn.Close()
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		conn, err := grpc.DialContext(ctx, serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+		if err != nil {
+			a.app.QueueUpdateDraw(func() {
+				a.grpcStatusText.SetText(fmt.Sprintf("[red]Failed to connect: %v", err))
+			})
+			return
+		}
+
+		a.grpcConn = conn
+		a.grpcStub = grpcdynamic.NewStub(conn)
+
+		// Gunakan refleksi
+		reflectionClient := grpc_reflection_v1alpha.NewServerReflectionClient(a.grpcConn)
+		a.grpcReflectClient = grpcreflect.NewClient(ctx, reflectionClient)
+		services, err := a.grpcReflectClient.ListServices()
+		if err != nil {
+			a.app.QueueUpdateDraw(func() {
+				a.grpcStatusText.SetText(fmt.Sprintf("[red]Failed to list services: %v", err))
+			})
+			return
+		}
+
+		// Kirim pembaruan UI kembali ke thread utama
+		a.app.QueueUpdateDraw(func() {
+			root := tview.NewTreeNode("Services").SetColor(tcell.ColorRed)
+			a.grpcServiceTree.SetRoot(root).SetCurrentNode(root)
+			for _, srv := range services {
+				if srv == "grpc.reflection.v1alpha.ServerReflection" {
+					continue
+				}
+				srvNode := tview.NewTreeNode(srv).SetColor(tcell.ColorGreen)
+				root.AddChild(srvNode)
+
+				sd, err := a.grpcReflectClient.ResolveService(srv)
+				if err != nil {
+					continue
+				}
+				for _, md := range sd.GetMethods() {
+					methodName := fmt.Sprintf("%s/%s", srv, md.GetName())
+					methodNode := tview.NewTreeNode(md.GetName()).SetReference(methodName).SetSelectable(true)
+					srvNode.AddChild(methodNode)
+				}
+			}
+
+			a.grpcStatusText.SetText(fmt.Sprintf("[green]Connected to %s. Found %d services.", serverAddr, len(services)-1))
+		})
+	}()
+}
+
+func (a *App) sendGrpcRequest() {
+	// Placeholder untuk logika pengiriman gRPC
+	// Ini akan menjadi sangat kompleks, melibatkan parsing JSON ke dynamic message,
+	// membuat context dengan metadata, memanggil stub, dan memformat respons.
+	// Untuk saat ini, kita tampilkan pesan placeholder.
+	a.grpcStatusText.SetText("[yellow]Sending gRPC request...")
+	a.grpcResponseView.SetText(fmt.Sprintf("Service: %s\n\nMetadata: %s\n\nBody: %s", a.grpcCurrentService, a.grpcRequestMeta.GetText(), a.grpcRequestBody.GetText()))
 }
 
 func (a *App) showSaveRequestModal() {
@@ -711,7 +903,7 @@ func main() {
 	app := NewApp()
 	app.Init()
 
-	defer app.saveCollections()
+	defer app.saveCollections() // Ini hanya menyimpan koleksi HTTP
 	if err := app.Run(); err != nil {
 		panic(err)
 	}
