@@ -15,8 +15,10 @@ import (
 	"github.com/rivo/tview"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 
+	"github.com/jhump/protoreflect/dynamic"
 	"github.com/jhump/protoreflect/dynamic/grpcdynamic"
 	"github.com/jhump/protoreflect/grpcreflect"
 )
@@ -95,7 +97,7 @@ func (a *App) loadCollections() {
 
 func NewApp() *App {
 	app := &App{
-		app:     tview.NewApplication(),
+		app:     tview.NewApplication().EnableMouse(true),
 		history: make([]Request, 0),
 		collectionsRoot: &CollectionNode{
 			Name:     "Collections",
@@ -114,7 +116,7 @@ func (a *App) Init() {
 
 	// Root pages untuk switch HTTP/gRPC
 	a.rootPages = tview.NewPages()
-	a.app.SetRoot(a.rootPages, true).EnableMouse(true)
+	a.app.SetRoot(a.rootPages, true)
 	a.rootPages.AddPage("http", mainFlex, true, true)
 
 	// Left panel - Request
@@ -319,6 +321,9 @@ func (a *App) Init() {
 7. View response in the right panel
 8. Access previous requests from History
 
+[yellow]Resizing Panels with Mouse:[-]
+1. Move your mouse cursor over the border between two panels.
+2. Click and drag the border to adjust the size.
 [yellow]Authorization Types:[-]
 - [green]No Auth[-]: No authentication
 - [green]Bearer Token[-]: JWT or OAuth tokens
@@ -513,12 +518,103 @@ func (a *App) grpcConnect() {
 }
 
 func (a *App) sendGrpcRequest() {
-	// Placeholder untuk logika pengiriman gRPC
-	// Ini akan menjadi sangat kompleks, melibatkan parsing JSON ke dynamic message,
-	// membuat context dengan metadata, memanggil stub, dan memformat respons.
-	// Untuk saat ini, kita tampilkan pesan placeholder.
-	a.grpcStatusText.SetText("[yellow]Sending gRPC request...")
-	a.grpcResponseView.SetText(fmt.Sprintf("Service: %s\n\nMetadata: %s\n\nBody: %s", a.grpcCurrentService, a.grpcRequestMeta.GetText(), a.grpcRequestBody.GetText()))
+	if a.grpcConn == nil {
+		a.grpcStatusText.SetText("[red]Not connected to any server.")
+		return
+	}
+	if a.grpcCurrentService == "" {
+		a.grpcStatusText.SetText("[red]No service/method selected.")
+		return
+	}
+
+	a.grpcStatusText.SetText(fmt.Sprintf("[yellow]Sending request to %s...", a.grpcCurrentService))
+	a.grpcResponseView.SetText("")
+
+	go func() {
+		// 1. Parse service and method name
+		parts := strings.SplitN(a.grpcCurrentService, "/", 2)
+		if len(parts) != 2 {
+			a.app.QueueUpdateDraw(func() {
+				a.grpcStatusText.SetText(fmt.Sprintf("[red]Invalid service/method format: %s", a.grpcCurrentService))
+			})
+			return
+		}
+		serviceName, methodName := parts[0], parts[1]
+
+		// 2. Resolve service and then find method descriptor
+		sd, err := a.grpcReflectClient.ResolveService(serviceName)
+		if err != nil {
+			a.app.QueueUpdateDraw(func() {
+				a.grpcStatusText.SetText(fmt.Sprintf("[red]Error resolving service '%s': %v", serviceName, err))
+			})
+			return
+		}
+		md := sd.FindMethodByName(methodName)
+		if md == nil {
+			a.app.QueueUpdateDraw(func() {
+				a.grpcStatusText.SetText(fmt.Sprintf("[red]Method '%s' not found in service '%s'", methodName, serviceName))
+			})
+			return
+		}
+
+		// 3. Create dynamic message from JSON body
+		req := md.GetInputType()
+		dynMsg := dynamic.NewMessage(req)
+		bodyText := a.grpcRequestBody.GetText()
+		if bodyText != "" {
+			if err := dynMsg.UnmarshalJSON([]byte(bodyText)); err != nil {
+				a.app.QueueUpdateDraw(func() {
+					a.grpcStatusText.SetText(fmt.Sprintf("[red]Error parsing request body JSON: %v", err))
+				})
+				return
+			}
+		}
+
+		// 4. Prepare context with metadata
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		metaText := a.grpcRequestMeta.GetText()
+		if metaText != "" {
+			var metaMap map[string]string
+			if err := json.Unmarshal([]byte(metaText), &metaMap); err != nil {
+				a.app.QueueUpdateDraw(func() {
+					a.grpcStatusText.SetText(fmt.Sprintf("[red]Error parsing metadata JSON: %v", err))
+				})
+				return
+			}
+			ctx = metadata.NewOutgoingContext(ctx, metadata.New(metaMap))
+		}
+
+		// 5. Invoke RPC
+		start := time.Now()
+		resp, err := a.grpcStub.InvokeRpc(ctx, md, dynMsg)
+		duration := time.Since(start)
+
+		a.app.QueueUpdateDraw(func() {
+			if err != nil {
+				a.grpcStatusText.SetText(fmt.Sprintf("[red]RPC Error: %v", err))
+				a.grpcResponseView.SetText(fmt.Sprintf("[red]%v", err))
+				return
+			}
+
+			// 6. Format and display response
+			dynResp, ok := resp.(*dynamic.Message)
+			if !ok {
+				a.grpcStatusText.SetText(fmt.Sprintf("[red]Internal Error: Unexpected response type %T", resp))
+				a.grpcResponseView.SetText(fmt.Sprintf("Could not format response: %v", resp))
+				return
+			}
+			respJSON, err := dynResp.MarshalJSONIndent()
+			if err != nil {
+				a.grpcStatusText.SetText(fmt.Sprintf("[red]Error formatting response JSON: %v", err))
+				a.grpcResponseView.SetText(fmt.Sprintf("Could not format response JSON: %v", err))
+				return
+			}
+			a.grpcStatusText.SetText(fmt.Sprintf("[green]Success![-] | Duration: [cyan]%v[-]", duration))
+			a.grpcResponseView.SetText(string(respJSON)).ScrollToBeginning()
+		})
+	}()
 }
 
 func (a *App) showSaveRequestModal() {
