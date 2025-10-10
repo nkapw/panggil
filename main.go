@@ -327,6 +327,10 @@ func (a *App) Init() {
 			a.showCreateFolderModal()
 			return nil
 		}
+		if event.Key() == tcell.KeyDelete {
+			a.showDeleteConfirmationModal()
+			return nil
+		}
 		return event
 	})
 
@@ -951,6 +955,42 @@ func (a *App) showCreateFolderModal() {
 	a.rootPages.AddPage("createFolderModal", modal, true, true)
 }
 
+func (a *App) showDeleteConfirmationModal() {
+	selectedNode := a.collectionsTree.GetCurrentNode()
+	if selectedNode == nil || selectedNode == a.collectionsTree.GetRoot() {
+		return // Tidak bisa menghapus root
+	}
+
+	ref := selectedNode.GetReference()
+	nodeToDelete, ok := ref.(*CollectionNode)
+	if !ok {
+		return
+	}
+
+	modal := tview.NewModal().
+		SetText(fmt.Sprintf("Are you sure you want to delete '%s'?", nodeToDelete.Name)).
+		AddButtons([]string{"Delete", "Cancel"}).
+		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+			if buttonLabel == "Delete" {
+				a.deleteCollectionItem(nodeToDelete)
+			}
+			a.rootPages.RemovePage("deleteConfirmModal")
+		})
+
+	a.rootPages.AddPage("deleteConfirmModal", modal, true, true)
+}
+
+func (a *App) deleteCollectionItem(nodeToDelete *CollectionNode) {
+	parentData := a.findParentNode(a.collectionsRoot, nodeToDelete)
+	if parentData == nil {
+		return
+	}
+
+	parentData.Children = removeNode(parentData.Children, nodeToDelete)
+	a.populateCollectionsTree()
+	a.saveCollections()
+}
+
 func (a *App) createCollectionFolder(name string) {
 	selectedTreeNode := a.collectionsTree.GetCurrentNode()
 	if selectedTreeNode == nil {
@@ -1093,6 +1133,16 @@ func (a *App) findParentNode(root, target *CollectionNode) *CollectionNode {
 		}
 	}
 	return nil
+}
+
+// removeNode adalah fungsi pembantu untuk menghapus node dari slice.
+func removeNode(slice []*CollectionNode, node *CollectionNode) []*CollectionNode {
+	for i, n := range slice {
+		if n == node {
+			return append(slice[:i], slice[i+1:]...)
+		}
+	}
+	return slice
 }
 
 func (a *App) updateAuthPanel(authType int) {
