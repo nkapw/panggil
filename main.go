@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -15,12 +14,15 @@ import (
 	"github.com/rivo/tview"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
+	"google.golang.org/protobuf/reflect/protoreflect"
+
+	"net/http"
 
 	"github.com/jhump/protoreflect/dynamic"
 	"github.com/jhump/protoreflect/dynamic/grpcdynamic"
 	"github.com/jhump/protoreflect/grpcreflect"
+	"google.golang.org/grpc/metadata"
 )
 
 type Request struct {
@@ -419,9 +421,14 @@ func (a *App) createGrpcPage() {
 			return
 		}
 		// Simpan service/method yang dipilih
-		if serviceName, ok := ref.(string); ok {
+		if serviceName, ok := ref.(string); ok && len(node.GetChildren()) == 0 {
 			a.grpcCurrentService = serviceName
 			a.grpcStatusText.SetText(fmt.Sprintf("Selected: [green]%s", serviceName))
+			a.grpcResponseView.SetText("") // Hapus respons sebelumnya
+			a.generateGrpcBodyTemplate(serviceName)
+		} else {
+			// Jika yang dipilih adalah folder (service), buka/tutup saja
+			node.SetExpanded(!node.IsExpanded())
 		}
 	})
 
@@ -432,7 +439,7 @@ func (a *App) createGrpcPage() {
 	middlePanel := tview.NewFlex().SetDirection(tview.FlexRow)
 	a.grpcRequestMeta = tview.NewTextArea().SetPlaceholder("Metadata (JSON format)...")
 	a.grpcRequestMeta.SetBorder(true).SetTitle("Metadata")
-	a.grpcRequestBody = tview.NewTextArea().SetPlaceholder("Request Body (JSON format)...")
+	a.grpcRequestBody = tview.NewTextArea().SetPlaceholder("Select a service method to see the request body template...")
 	a.grpcRequestBody.SetBorder(true).SetTitle("Request Body")
 	sendGrpcBtn := tview.NewButton("Send (F5)").SetSelectedFunc(a.sendGrpcRequest)
 	middlePanel.AddItem(a.grpcRequestMeta, 0, 1, false).AddItem(a.grpcRequestBody, 0, 2, false).AddItem(sendGrpcBtn, 1, 0, false)
@@ -447,6 +454,102 @@ func (a *App) createGrpcPage() {
 
 	grpcFlex.AddItem(leftPanel, 30, 0, true).AddItem(middlePanel, 0, 1, false).AddItem(rightPanel, 0, 1, false)
 	a.rootPages.AddPage("grpc", grpcFlex, true, false)
+}
+
+func (a *App) generateGrpcBodyTemplate(fullMethodName string) {
+	if a.grpcReflectClient == nil {
+		return
+	}
+
+	// Jalankan di goroutine agar tidak memblokir UI
+	go func() {
+		parts := strings.SplitN(fullMethodName, "/", 2)
+		if len(parts) != 2 {
+			return // Format tidak valid
+		}
+		serviceName, methodName := parts[0], parts[1]
+
+		// ResolveService adalah panggilan jaringan, harus di luar thread utama
+		sd, err := a.grpcReflectClient.ResolveService(serviceName)
+		if err != nil {
+			return // Service tidak ditemukan
+		}
+
+		md := sd.FindMethodByName(methodName)
+		if md == nil {
+			return // Method tidak ditemukan
+		}
+
+		// Buat template JSON dari deskriptor pesan
+		reqType := md.GetInputType()
+
+		// Gunakan .Unwrap() untuk mendapatkan deskriptor API baru yang kompatibel.
+		newReqType := reqType.Unwrap().(protoreflect.MessageDescriptor)
+		templateMap := buildTemplateMap(newReqType)
+		jsonTemplate, err := json.MarshalIndent(templateMap, "", "  ")
+		if err != nil {
+			a.app.QueueUpdateDraw(func() {
+				a.grpcRequestBody.SetText(fmt.Sprintf("/* could not marshal template: %v */", err), false)
+			})
+			return
+		}
+
+		// Kirim pembaruan UI kembali ke thread utama
+		a.app.QueueUpdateDraw(func() {
+			// Jika template kosong (misalnya untuk Empty message), tampilkan {}
+			if string(jsonTemplate) == "null" {
+				jsonTemplate = []byte("{}")
+			}
+			a.grpcRequestBody.SetText(string(jsonTemplate), false)
+		})
+	}()
+}
+
+// buildTemplateMap secara rekursif membuat map[string]interface{} dari deskriptor pesan Protobuf.
+// Ini memastikan semua field disertakan dalam template JSON, tidak seperti marshalling pesan kosong.
+func buildTemplateMap(md protoreflect.MessageDescriptor) map[string]interface{} {
+	// Hindari rekursi tak terbatas pada tipe well-known seperti google.protobuf.Any
+	if md.FullName() == "google.protobuf.Any" {
+		return map[string]interface{}{
+			"@type": "type.googleapis.com/your.Type",
+			"value": "...",
+		}
+	}
+
+	template := make(map[string]interface{})
+	fields := md.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		field := fields.Get(i)
+		fieldName := string(field.JSONName())
+
+		if field.IsList() {
+			template[fieldName] = []interface{}{}
+		} else if field.IsMap() {
+			template[fieldName] = make(map[string]interface{})
+		} else if field.Kind() == protoreflect.MessageKind {
+			template[fieldName] = buildTemplateMap(field.Message())
+		} else {
+			template[fieldName] = getZeroValue(field)
+		}
+	}
+	// Jika map kosong setelah iterasi (misalnya untuk google.protobuf.Empty), kembalikan nil
+	// agar json.MarshalIndent menghasilkan "null" yang bisa kita tangani.
+	if len(template) == 0 {
+		return nil
+	}
+	return template
+}
+
+// getZeroValue mengembalikan nilai nol yang sesuai untuk tipe field Protobuf.
+func getZeroValue(fd protoreflect.FieldDescriptor) interface{} {
+	switch fd.Kind() {
+	case protoreflect.StringKind:
+		return ""
+	case protoreflect.BoolKind:
+		return false
+	default: // Int32, Int64, Float, Double, Enum, etc.
+		return 0
+	}
 }
 
 func (a *App) grpcConnect() {
