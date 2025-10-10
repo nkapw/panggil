@@ -52,6 +52,7 @@ type App struct {
 	app             *tview.Application
 	rootPages       *tview.Pages // Halaman utama untuk beralih antara HTTP dan gRPC
 	rightPages      *tview.Pages
+	contentLayout   *tview.Flex // Layout untuk explorer dan halaman utama
 	appLayout       *tview.Flex // Layout paling atas aplikasi
 	explorerPanel   *tview.Flex // Panel kiri untuk Collections/History
 	httpRightPanel  *tview.Flex // Referensi ke panel kanan di view HTTP
@@ -150,7 +151,7 @@ func NewApp() *App {
 			Expanded: true,
 		},
 		grpcBodyCache:        make(map[string]string),
-		explorerPanelVisible: true,
+		explorerPanelVisible: false, // Sembunyikan explorer panel secara default
 	}
 	// Muat koleksi yang ada, jika tidak ada, root akan tetap ada
 	app.loadCollections()
@@ -253,19 +254,11 @@ func (a *App) Init() {
 	a.responseText.SetBorder(true).SetTitle("Response")
 
 	// History
-	a.historyList = tview.NewList().ShowSecondaryText(false)
-	a.historyList.SetBorder(true).SetTitle("History (F7)")
-	a.historyList.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
-		if index < len(a.history) {
-			req := a.history[index]
-			a.loadRequest(req)
-		}
-	})
 
 	// Collections
 	a.collectionsTree = tview.NewTreeView()
-	a.collectionsTree.SetBorder(true).SetTitle("Collections (F9, 'n' for new folder)")
-	a.populateCollectionsTree()
+	a.collectionsTree.SetBorder(true).SetTitle("Collections")
+	a.populateCollectionsTree() // Tampilkan semua koleksi saat startup
 	a.collectionsTree.SetSelectedFunc(func(node *tview.TreeNode) {
 		reference := node.GetReference()
 		if reference == nil {
@@ -303,11 +296,6 @@ func (a *App) Init() {
 		return event
 	})
 
-	// Right panel pages (History/Collections)
-	a.rightPages = tview.NewPages()
-	a.rightPages.AddPage("history", a.historyList, true, true)
-	a.rightPages.AddPage("collections", a.collectionsTree, true, false)
-
 	a.httpRightPanel.AddItem(a.statusText, 3, 0, false).AddItem(a.responseText, 0, 1, false)
 	mainFlex.AddItem(leftPanel, 0, 1, true).AddItem(a.httpRightPanel, 0, 1, false)
 
@@ -319,14 +307,32 @@ func (a *App) Init() {
 
 	// Tambahkan header/switcher di atas
 	a.headerBar = a.createHeaderBar()
-	rootFlex := tview.NewFlex().SetDirection(tview.FlexRow).AddItem(a.headerBar, 1, 0, false).AddItem(a.rootPages, 0, 1, true)
+
+	// History - Inisialisasi di sini agar bisa diakses oleh explorer
+	a.historyList = tview.NewList().ShowSecondaryText(false)
+	a.historyList.SetBorder(true).SetTitle("History")
+	a.historyList.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
+		// Logika pemuatan akan ditangani oleh updateHistoryView
+		// Untuk saat ini, kita hanya perlu tahu item mana yang dipilih.
+		// Kita bisa menambahkan logika untuk memuat request yang benar di sini nanti.
+	})
 
 	// Buat panel explorer di sebelah kiri
 	a.explorerPanel = tview.NewFlex().SetDirection(tview.FlexRow)
 	a.explorerPanel.AddItem(a.collectionsTree, 0, 1, false).AddItem(a.historyList, 0, 1, false)
 
 	// Layout paling atas yang menggabungkan explorer dan konten utama
-	a.appLayout = tview.NewFlex().AddItem(a.explorerPanel, 40, 1, false).AddItem(rootFlex, 0, 2, true)
+	initialExplorerSize := 0
+	initialExplorerProportion := 0
+	if a.explorerPanelVisible {
+		initialExplorerSize = 40
+		initialExplorerProportion = 0 // Gunakan fixed size, bukan proporsi
+	}
+	// contentLayout menampung explorer dan halaman utama (HTTP/gRPC)
+	a.contentLayout = tview.NewFlex().
+		AddItem(a.explorerPanel, initialExplorerSize, initialExplorerProportion, false).
+		AddItem(a.rootPages, 0, 1, true)
+	a.appLayout = tview.NewFlex().SetDirection(tview.FlexRow).AddItem(a.headerBar, 1, 0, false).AddItem(a.contentLayout, 0, 1, true)
 	// Help modal
 	helpText := tview.NewTextView().
 		SetDynamicColors(true).
@@ -385,13 +391,13 @@ Press Esc to close this help.`)
 			a.clearForm()
 			return nil
 		case tcell.KeyF7:
-			a.app.SetFocus(a.historyList) // Focus history list in the explorer
+			a.app.SetFocus(a.historyList)
 			return nil
 		case tcell.KeyF8:
 			a.showSaveRequestModal()
 			return nil
 		case tcell.KeyF9:
-			a.app.SetFocus(a.collectionsTree) // Focus collections tree in the explorer
+			a.app.SetFocus(a.collectionsTree)
 			return nil
 		case tcell.KeyF1:
 			a.rootPages.ShowPage("help")
@@ -423,6 +429,7 @@ func (a *App) createHeaderBar() *tview.Flex {
 	clearBtn := tview.NewButton("Clear (F6)").SetSelectedFunc(a.clearForm)
 	saveBtn := tview.NewButton("Save (F8)").SetSelectedFunc(a.showSaveRequestModal)
 	grpcSendBtn := tview.NewButton("Send (F5)").SetSelectedFunc(a.sendGrpcRequest)
+	explorerBtn := tview.NewButton("Explorer (Ctrl+E)").SetSelectedFunc(a.toggleExplorerPanel)
 
 	// Atur ulang header saat mode berubah
 	a.rootPages.SetChangedFunc(func() {
@@ -433,11 +440,13 @@ func (a *App) createHeaderBar() *tview.Flex {
 			header.AddItem(httpSendBtn, 0, 1, false).
 				AddItem(clearBtn, 0, 1, false).
 				AddItem(saveBtn, 0, 1, false).
+				AddItem(explorerBtn, 0, 1, false).
 				AddItem(switchModeBtn, 0, 1, false)
 		} else {
 			// Tombol Connect dan input server sekarang ada di dalam halaman gRPC
 			header.AddItem(grpcSendBtn, 0, 1, false).
 				AddItem(saveBtn, 0, 1, false).
+				AddItem(explorerBtn, 0, 1, false).
 				AddItem(switchModeBtn, 0, 1, false)
 		}
 	})
@@ -446,6 +455,7 @@ func (a *App) createHeaderBar() *tview.Flex {
 	header.AddItem(httpSendBtn, 0, 1, false).
 		AddItem(clearBtn, 0, 1, false).
 		AddItem(saveBtn, 0, 1, false).
+		AddItem(explorerBtn, 0, 1, false).
 		AddItem(switchModeBtn, 0, 1, false)
 
 	return header
@@ -814,6 +824,30 @@ func (a *App) sendGrpcRequest() {
 			a.grpcResponseView.SetText(string(respJSON)).ScrollToBeginning()
 		})
 	}()
+
+	// Add to history
+	historyReq := Request{
+		Name:         a.grpcCurrentService,
+		Type:         "grpc",
+		GrpcServer:   a.grpcServerInput.GetText(),
+		GrpcMethod:   a.grpcCurrentService,
+		GrpcMetadata: a.grpcRequestMeta.GetText(),
+		Body:         a.grpcRequestBody.GetText(),
+		Time:         time.Now(),
+	}
+	a.history = append([]Request{historyReq}, a.history...)
+	// Update history view to reflect the new item in the current mode
+	a.updateHistoryView()
+}
+func (a *App) loadRequestFromHistory(index int) {
+	if index < len(a.history) {
+		req := a.history[index]
+		if req.Type == "grpc" {
+			a.loadGrpcRequest(req)
+		} else {
+			a.loadRequest(req)
+		}
+	}
 }
 
 func (a *App) showSaveRequestModal() {
@@ -973,7 +1007,7 @@ func (a *App) saveCurrentRequest(name string) {
 	parentData.Children = append(parentData.Children, newNode)
 
 	a.populateCollectionsTree()
-	a.saveCollections()
+	a.saveCollections() // Save changes
 }
 
 func (a *App) populateCollectionsTree() {
@@ -1170,12 +1204,28 @@ func (a *App) sendRequest() {
 		Body:    bodyText,
 		Time:    time.Now(),
 	}
+	historyReq.Type = "http" // Ensure type is set for history
 	a.history = append([]Request{historyReq}, a.history...)
 
-	a.historyList.InsertItem(0,
-		fmt.Sprintf("[%s] %s (%s)", method, url, historyReq.Time.Format("15:04:05")),
-		"",
-		0, nil)
+	// Update history view to reflect the new item in the current mode
+	a.updateHistoryView()
+}
+
+func (a *App) updateHistoryView() {
+	a.historyList.Clear()
+	for _, req := range a.history {
+		var title string
+		if req.Type == "grpc" {
+			title = fmt.Sprintf("[gRPC] %s (%s)", req.Name, req.Time.Format("15:04:05"))
+		} else {
+			title = fmt.Sprintf("[%s] %s (%s)", req.Method, req.URL, req.Time.Format("15:04:05"))
+		}
+		a.historyList.AddItem(title, "", 0, nil)
+	}
+	// Set ulang selected func untuk menangkap index yang benar dari list yang sudah difilter
+	a.historyList.SetSelectedFunc(func(i int, mainText string, secondaryText string, shortcut rune) {
+		a.loadRequestFromHistory(i)
+	})
 }
 
 func (a *App) clearForm() {
@@ -1272,12 +1322,11 @@ func (a *App) loadGrpcRequest(req Request) {
 func (a *App) toggleExplorerPanel() {
 	a.explorerPanelVisible = !a.explorerPanelVisible
 	if a.explorerPanelVisible {
-		// Tampilkan panel dengan mengembalikan ukurannya ke nilai semula.
-		// fixedSize = 40, proportion = 1
-		a.appLayout.ResizeItem(a.explorerPanel, 40, 1)
+		// Tampilkan panel dengan memberikan ukuran tetap 40
+		a.contentLayout.ResizeItem(a.explorerPanel, 40, 0)
 	} else {
 		// Sembunyikan panel dengan mengatur fixedSize dan proportion menjadi 0.
-		a.appLayout.ResizeItem(a.explorerPanel, 0, 0)
+		a.contentLayout.ResizeItem(a.explorerPanel, 0, 0)
 	}
 }
 
