@@ -88,6 +88,7 @@ type App struct {
 	grpcBodyCache        map[string]string // Cache untuk body request gRPC
 	explorerPanelVisible bool
 	isLoadingRequest     bool // Flag untuk mencegah side-effect saat memuat request
+	currentPage          string
 }
 
 // getConfigPath mengembalikan path absolut untuk file konfigurasi,
@@ -324,8 +325,11 @@ func (a *App) Init() {
 			if req != nil {
 				// Default ke http jika tipe tidak ada (untuk kompatibilitas mundur)
 				if req.Type == "grpc" {
+					log.Println("Loading gRPC request from collection:", req.Name)
 					a.loadGrpcRequest(*req)
 				} else {
+					log.Println("Loading HTTP request from collection:", req.Name)
+
 					a.loadRequest(*req)
 				}
 			}
@@ -513,9 +517,11 @@ func (a *App) switchMode() {
 	currentPage, _ := a.rootPages.GetFrontPage()
 	if currentPage == "http" {
 		a.rootPages.SwitchToPage("grpc")
+		a.currentPage = "grpc"
 		a.app.SetFocus(a.grpcServerInput)
 	} else {
 		a.rootPages.SwitchToPage("http")
+		a.currentPage = "http"
 		a.app.SetFocus(a.urlInput)
 	}
 }
@@ -544,6 +550,15 @@ func (a *App) createGrpcPage() {
 			a.grpcStatusText.SetText(fmt.Sprintf("Selected: [green]%s", serviceName))
 			a.grpcResponseView.SetText("") // Hapus respons sebelumnya
 			// Biarkan request body tidak berubah saat memilih method baru.
+
+			log.Printf("a.grpcBodyCache[serviceName]: %v\n", a.grpcBodyCache[serviceName])
+			// 3. Muat body dari cache jika ada, atau kosongkan
+			if cachedBody, exists := a.grpcBodyCache[serviceName]; exists {
+				a.grpcRequestBody.SetText(cachedBody, true)
+			} else {
+				a.grpcRequestBody.SetText("", true)
+			}
+
 		} else {
 			// Jika yang dipilih adalah folder (service), buka/tutup saja
 			node.SetExpanded(!node.IsExpanded())
@@ -910,8 +925,9 @@ func (a *App) loadRequestFromHistory(index int) {
 
 func (a *App) showSaveRequestModal() {
 	var defaultName string
-	currentPage, _ := a.rootPages.GetFrontPage()
-	if currentPage == "grpc" {
+	// currentPage, _ := a.rootPages.GetFrontPage()
+	log.Printf("a.currentPage show modal: %v\n", a.currentPage)
+	if a.currentPage == "grpc" {
 		if a.grpcCurrentService != "" {
 			defaultName = a.grpcCurrentService
 		} else {
@@ -1033,9 +1049,9 @@ func (a *App) createCollectionFolder(name string) {
 
 func (a *App) saveCurrentRequest(name string) {
 	var requestData *Request
-	currentPage, _ := a.rootPages.GetFrontPage()
-
-	if currentPage == "grpc" {
+	// currentPage, _ := a.rootPages.GetFrontPage()
+	log.Printf("currentPage: %v\n", a.currentPage)
+	if a.currentPage == "grpc" {
 		requestData = &Request{
 			Name:         name,
 			Type:         "grpc",
@@ -1383,9 +1399,13 @@ func (a *App) loadGrpcRequest(req Request) {
 	// Pindah ke halaman gRPC
 	a.rootPages.SwitchToPage("grpc")
 
-	// Set flag untuk menandakan kita sedang memuat.
-	a.isLoadingRequest = true
-	// Pastikan flag di-reset setelah semua operasi (termasuk asinkron) selesai.
+	// Langkah 1: Isi semua data ke UI terlebih dahulu.
+	// Ini adalah data yang benar dan tidak boleh ditimpa.
+	a.grpcServerInput.SetText(req.GrpcServer)
+	a.grpcRequestMeta.SetText(req.GrpcMetadata, false)
+	a.grpcRequestBody.SetText(req.Body, false)
+	a.grpcCurrentService = req.GrpcMethod
+	a.grpcStatusText.SetText(fmt.Sprintf("Loaded: [green]%s[-]", req.Name))
 
 	// 3. Simpan body yang dimuat ke cache agar tidak hilang saat beralih
 	if req.GrpcMethod != "" {
@@ -1393,11 +1413,8 @@ func (a *App) loadGrpcRequest(req Request) {
 	}
 
 	// 4. Definisikan callback yang akan dijalankan setelah koneksi berhasil
-	// Callback ini akan memilih node DAN mengisi data setelah tree siap.
+	// Callback ini SEKARANG HANYA bertugas memilih node di pohon layanan.
 	onConnectSuccess := func() {
-		// Pastikan flag di-reset di akhir callback ini.
-		defer func() { a.isLoadingRequest = false }()
-
 		a.grpcCurrentService = req.GrpcMethod
 		// Cari node di tree yang sesuai dengan method yang disimpan
 		var targetNode *tview.TreeNode
@@ -1413,15 +1430,12 @@ func (a *App) loadGrpcRequest(req Request) {
 
 		// Jika ditemukan, pilih node tersebut
 		if targetNode != nil {
-			a.grpcServiceTree.SetCurrentNode(targetNode)
-			// PENTING: Isi body dan metadata SETELAH node dipilih untuk menghindari penimpaan.
-			a.grpcRequestMeta.SetText(req.GrpcMetadata, false)
-			a.grpcRequestBody.SetText(req.Body, false)
-			a.grpcStatusText.SetText(fmt.Sprintf("Selected: [green]%s", a.grpcCurrentService))
+			a.app.QueueUpdateDraw(func() {
+				a.grpcServiceTree.SetCurrentNode(targetNode)
+			})
 		}
 	}
 
-	a.grpcServerInput.SetText(req.GrpcServer)
 	// 5. Panggil grpcConnect dengan callback untuk otomatis terhubung dan memilih method
 	a.grpcConnect(onConnectSuccess)
 	a.app.SetFocus(a.grpcServerInput)
