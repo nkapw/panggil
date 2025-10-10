@@ -27,12 +27,17 @@ import (
 )
 
 type Request struct {
-	Name    string
-	Method  string
-	URL     string
-	Headers map[string]string
-	Body    string
-	Time    time.Time
+	Name    string            `json:"name"`
+	Method  string            `json:"method,omitempty"` // For HTTP
+	URL     string            `json:"url,omitempty"`    // For HTTP
+	Headers map[string]string `json:"headers,omitempty"`
+	Body    string            `json:"body"`
+	Time    time.Time         `json:"time"`
+
+	Type         string `json:"type"` // "http" or "grpc"
+	GrpcServer   string `json:"grpc_server,omitempty"`
+	GrpcMethod   string `json:"grpc_method,omitempty"`
+	GrpcMetadata string `json:"grpc_metadata,omitempty"`
 }
 
 type CollectionNode struct {
@@ -47,7 +52,9 @@ type App struct {
 	app             *tview.Application
 	rootPages       *tview.Pages // Halaman utama untuk beralih antara HTTP dan gRPC
 	rightPages      *tview.Pages
-	pages           *tview.Pages
+	appLayout       *tview.Flex // Layout paling atas aplikasi
+	explorerPanel   *tview.Flex // Panel kiri untuk Collections/History
+	httpRightPanel  *tview.Flex // Referensi ke panel kanan di view HTTP
 	methodDrop      *tview.DropDown
 	urlInput        *tview.InputField
 	authType        *tview.DropDown
@@ -65,18 +72,19 @@ type App struct {
 	collectionsRoot *CollectionNode
 
 	// gRPC components
-	grpcPages          *tview.Pages
-	grpcServerInput    *tview.InputField
-	grpcServiceTree    *tview.TreeView
-	grpcRequestMeta    *tview.TextArea
-	grpcRequestBody    *tview.TextArea
-	grpcResponseView   *tview.TextView
-	grpcStatusText     *tview.TextView
-	grpcReflectClient  *grpcreflect.Client
-	grpcStub           grpcdynamic.Stub
-	grpcConn           *grpc.ClientConn
-	grpcCurrentService string
-	grpcBodyCache      map[string]string // Cache untuk body request gRPC
+	grpcPages            *tview.Pages
+	grpcServerInput      *tview.InputField
+	grpcServiceTree      *tview.TreeView
+	grpcRequestMeta      *tview.TextArea
+	grpcRequestBody      *tview.TextArea
+	grpcResponseView     *tview.TextView
+	grpcStatusText       *tview.TextView
+	grpcReflectClient    *grpcreflect.Client
+	grpcStub             grpcdynamic.Stub
+	grpcConn             *grpc.ClientConn
+	grpcCurrentService   string
+	grpcBodyCache        map[string]string // Cache untuk body request gRPC
+	explorerPanelVisible bool
 }
 
 // getConfigPath mengembalikan path absolut untuk file konfigurasi,
@@ -140,7 +148,8 @@ func NewApp() *App {
 			IsFolder: true,
 			Expanded: true,
 		},
-		grpcBodyCache: make(map[string]string),
+		grpcBodyCache:        make(map[string]string),
+		explorerPanelVisible: true,
 	}
 	// Muat koleksi yang ada, jika tidak ada, root akan tetap ada
 	app.loadCollections()
@@ -249,7 +258,7 @@ func (a *App) Init() {
 	leftPanel.AddItem(buttonFlex, 3, 0, false)
 
 	// Right panel - Response and History
-	rightPanel := tview.NewFlex().SetDirection(tview.FlexRow)
+	a.httpRightPanel = tview.NewFlex().SetDirection(tview.FlexRow)
 
 	// Status
 	a.statusText = tview.NewTextView().
@@ -295,8 +304,14 @@ func (a *App) Init() {
 			collectionNode.Expanded = node.IsExpanded()
 		} else {
 			// Muat permintaan
-			if collectionNode.Request != nil {
-				a.loadRequest(*collectionNode.Request)
+			req := collectionNode.Request
+			if req != nil {
+				// Default ke http jika tipe tidak ada (untuk kompatibilitas mundur)
+				if req.Type == "grpc" {
+					a.loadGrpcRequest(*req)
+				} else {
+					a.loadRequest(*req)
+				}
 			}
 		}
 	})
@@ -314,17 +329,8 @@ func (a *App) Init() {
 	a.rightPages.AddPage("history", a.historyList, true, true)
 	a.rightPages.AddPage("collections", a.collectionsTree, true, false)
 
-	rightPanel.AddItem(a.statusText, 3, 0, false)
-	rightPanel.AddItem(a.responseText, 0, 2, false)
-	rightPanel.AddItem(a.rightPages, 0, 1, false)
-
-	// Main layout
-	mainFlex.AddItem(leftPanel, 0, 1, true)
-	mainFlex.AddItem(rightPanel, 0, 1, false)
-
-	// Pages
-	a.pages = tview.NewPages()
-	a.pages.AddPage("main", mainFlex, true, true)
+	a.httpRightPanel.AddItem(a.statusText, 3, 0, false).AddItem(a.responseText, 0, 1, false)
+	mainFlex.AddItem(leftPanel, 0, 1, true).AddItem(a.httpRightPanel, 0, 1, false)
 
 	// Buat halaman gRPC
 	a.createGrpcPage()
@@ -333,6 +339,12 @@ func (a *App) Init() {
 	switcher := a.createModeSwitcher()
 	rootFlex := tview.NewFlex().SetDirection(tview.FlexRow).AddItem(switcher, 1, 0, false).AddItem(a.rootPages, 0, 1, true)
 
+	// Buat panel explorer di sebelah kiri
+	a.explorerPanel = tview.NewFlex().SetDirection(tview.FlexRow)
+	a.explorerPanel.AddItem(a.collectionsTree, 0, 1, false).AddItem(a.historyList, 0, 1, false)
+
+	// Layout paling atas yang menggabungkan explorer dan konten utama
+	a.appLayout = tview.NewFlex().AddItem(a.explorerPanel, 40, 1, false).AddItem(rootFlex, 0, 2, true)
 	// Help modal
 	helpText := tview.NewTextView().
 		SetDynamicColors(true).
@@ -343,9 +355,10 @@ func (a *App) Init() {
 [green]F7[-]     - Focus History
 [green]F8[-]     - Save Request to Collection
 [green]F9[-]     - Focus Collections
-[green]F12[-]    - Switch HTTP/gRPC Mode
+[green]F12[-]    - Switch HTTP/gRPC Mode 
 [green]F1[-]     - Show Help
 [green]Ctrl+C[-] - Quit Application
+[green]Ctrl+E[-] - Toggle Collections/History Panel
 [green]Tab[-]    - Navigate between fields
 [green]Esc[-]    - Close Help
 
@@ -370,9 +383,9 @@ func (a *App) Init() {
 - [green]API Key[-]: Add manually in headers
 
 Press Esc to close this help.`)
-	helpText.SetBorder(true).SetTitle("Help - HTTP Client")
+	helpText.SetBorder(true).SetTitle("Help")
 
-	a.pages.AddPage("help", a.createModal(helpText, 60, 20), true, false)
+	a.rootPages.AddPage("help", a.createModal(helpText, 60, 20), true, false)
 
 	// Key bindings
 	a.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -384,30 +397,31 @@ Press Esc to close this help.`)
 			a.clearForm()
 			return nil
 		case tcell.KeyF7:
-			a.app.SetFocus(a.historyList)
-			a.rightPages.SwitchToPage("history")
+			a.app.SetFocus(a.historyList) // Focus history list in the explorer
 			return nil
 		case tcell.KeyF8:
 			a.showSaveRequestModal()
 			return nil
 		case tcell.KeyF9:
-			a.app.SetFocus(a.collectionsTree)
-			a.rightPages.SwitchToPage("collections")
+			a.app.SetFocus(a.collectionsTree) // Focus collections tree in the explorer
 			return nil
 		case tcell.KeyF1:
-			a.pages.ShowPage("help")
+			a.rootPages.ShowPage("help")
 			return nil
 		case tcell.KeyF12:
 			a.switchMode()
 			return nil
 		case tcell.KeyEsc:
-			a.pages.HidePage("help")
+			a.rootPages.HidePage("help")
+			return nil
+		case tcell.KeyCtrlE:
+			a.toggleExplorerPanel()
 			return nil
 		}
 		return event
 	})
 
-	a.app.SetRoot(rootFlex, true)
+	a.app.SetRoot(a.appLayout, true)
 	a.app.SetFocus(a.urlInput)
 }
 
@@ -788,26 +802,36 @@ func (a *App) sendGrpcRequest() {
 }
 
 func (a *App) showSaveRequestModal() {
-	_, method := a.methodDrop.GetCurrentOption()
-	url := a.urlInput.GetText()
-
-	nameInput := tview.NewInputField().SetLabel("Request Name").SetText(fmt.Sprintf("%s %s", method, url)).SetFieldWidth(60)
+	var defaultName string
+	currentPage, _ := a.rootPages.GetFrontPage()
+	if currentPage == "grpc" {
+		if a.grpcCurrentService != "" {
+			defaultName = a.grpcCurrentService
+		} else {
+			defaultName = "New gRPC Request"
+		}
+	} else {
+		_, method := a.methodDrop.GetCurrentOption()
+		url := a.urlInput.GetText()
+		defaultName = fmt.Sprintf("%s %s", method, url)
+	}
+	nameInput := tview.NewInputField().SetLabel("Request Name").SetText(defaultName).SetFieldWidth(60)
 
 	form := tview.NewForm().
 		AddFormItem(nameInput).
 		AddButton("Save", func() {
 			name := nameInput.GetText()
 			a.saveCurrentRequest(name)
-			a.pages.RemovePage("saveModal")
+			a.rootPages.RemovePage("saveModal")
 		}).
 		AddButton("Cancel", func() {
-			a.pages.RemovePage("saveModal")
+			a.rootPages.RemovePage("saveModal")
 		})
 
 	form.SetBorder(true).SetTitle("Save Request to Collection")
 	modal := a.createModal(form, 80, 7)
 	a.app.SetFocus(nameInput)
-	a.pages.AddPage("saveModal", modal, true, true)
+	a.rootPages.AddPage("saveModal", modal, true, true)
 }
 
 func (a *App) showCreateFolderModal() {
@@ -820,16 +844,16 @@ func (a *App) showCreateFolderModal() {
 			if folderName != "" {
 				a.createCollectionFolder(folderName)
 			}
-			a.pages.RemovePage("createFolderModal")
+			a.rootPages.RemovePage("createFolderModal")
 		}).
 		AddButton("Cancel", func() {
-			a.pages.RemovePage("createFolderModal")
+			a.rootPages.RemovePage("createFolderModal")
 		})
 
 	form.SetBorder(true).SetTitle("Create New Folder")
 	modal := a.createModal(form, 70, 7)
 	a.app.SetFocus(nameInput)
-	a.pages.AddPage("createFolderModal", modal, true, true)
+	a.rootPages.AddPage("createFolderModal", modal, true, true)
 }
 
 func (a *App) createCollectionFolder(name string) {
@@ -865,25 +889,45 @@ func (a *App) createCollectionFolder(name string) {
 }
 
 func (a *App) saveCurrentRequest(name string) {
-	_, method := a.methodDrop.GetCurrentOption()
-	url := a.urlInput.GetText()
-	headersText := a.headersText.GetText()
-	body := a.bodyText.GetText()
+	var requestData *Request
+	currentPage, _ := a.rootPages.GetFrontPage()
 
-	headers := make(map[string]string)
-	if headersText != "" {
-		_ = json.Unmarshal([]byte(headersText), &headers)
+	if currentPage == "grpc" {
+		requestData = &Request{
+			Name:         name,
+			Type:         "grpc",
+			GrpcServer:   a.grpcServerInput.GetText(),
+			GrpcMethod:   a.grpcCurrentService,
+			GrpcMetadata: a.grpcRequestMeta.GetText(),
+			Body:         a.grpcRequestBody.GetText(),
+			Time:         time.Now(),
+		}
+	} else { // HTTP
+		_, method := a.methodDrop.GetCurrentOption()
+		url := a.urlInput.GetText()
+		headersText := a.headersText.GetText()
+		body := a.bodyText.GetText()
+
+		headers := make(map[string]string)
+		if headersText != "" {
+			_ = json.Unmarshal([]byte(headersText), &headers)
+		}
+
+		requestData = &Request{
+			Name:    name,
+			Type:    "http",
+			Method:  method,
+			URL:     url,
+			Headers: headers,
+			Body:    body,
+			Time:    time.Now(),
+		}
 	}
 
-	requestData := &Request{
-		Name:    name,
-		Method:  method,
-		URL:     url,
-		Headers: headers,
-		Body:    body,
-		Time:    time.Now(),
+	// Jika tidak ada data yang bisa disimpan
+	if requestData == nil {
+		return
 	}
-
 	newNode := &CollectionNode{
 		Name:     name,
 		IsFolder: false,
@@ -1159,6 +1203,34 @@ func (a *App) loadRequest(req Request) {
 	}
 
 	a.app.SetFocus(a.urlInput)
+}
+
+func (a *App) loadGrpcRequest(req Request) {
+	// Pindah ke halaman gRPC
+	a.rootPages.SwitchToPage("grpc")
+
+	// Isi field dari data yang tersimpan
+	a.grpcServerInput.SetText(req.GrpcServer)
+	a.grpcRequestMeta.SetText(req.GrpcMetadata, false)
+	a.grpcRequestBody.SetText(req.Body, false)
+
+	// Simpan body yang dimuat ke cache
+	if req.GrpcMethod != "" {
+		a.grpcBodyCache[req.GrpcMethod] = req.Body
+	}
+	a.app.SetFocus(a.grpcServerInput)
+}
+
+func (a *App) toggleExplorerPanel() {
+	a.explorerPanelVisible = !a.explorerPanelVisible
+	if a.explorerPanelVisible {
+		// Tampilkan panel dengan mengembalikan ukurannya ke nilai semula.
+		// fixedSize = 40, proportion = 1
+		a.appLayout.ResizeItem(a.explorerPanel, 40, 1)
+	} else {
+		// Sembunyikan panel dengan mengatur fixedSize dan proportion menjadi 0.
+		a.appLayout.ResizeItem(a.explorerPanel, 0, 0)
+	}
 }
 
 func (a *App) Run() error {
