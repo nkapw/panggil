@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,11 +52,10 @@ type CollectionNode struct {
 type App struct {
 	app             *tview.Application
 	rootPages       *tview.Pages // Halaman utama untuk beralih antara HTTP dan gRPC
-	rightPages      *tview.Pages
-	contentLayout   *tview.Flex // Layout untuk explorer dan halaman utama
-	appLayout       *tview.Flex // Layout paling atas aplikasi
-	explorerPanel   *tview.Flex // Panel kiri untuk Collections/History
-	httpRightPanel  *tview.Flex // Referensi ke panel kanan di view HTTP
+	contentLayout   *tview.Flex  // Layout untuk explorer dan halaman utama
+	appLayout       *tview.Flex  // Layout paling atas aplikasi
+	explorerPanel   *tview.Flex  // Panel kiri untuk Collections/History
+	httpRightPanel  *tview.Flex  // Referensi ke panel kanan di view HTTP
 	methodDrop      *tview.DropDown
 	urlInput        *tview.InputField
 	authType        *tview.DropDown
@@ -105,40 +105,74 @@ func getConfigPath(filename string) (string, error) {
 	return filepath.Join(appConfigDir, filename), nil
 }
 
+func initLogger() {
+	path, err := getConfigPath("myhttp.log")
+	if err != nil {
+		log.Fatalf("FATAL: Failed to get log file path: %v", err)
+	}
+
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("FATAL: error opening log file: %v", err)
+	}
+	log.SetOutput(f)
+	log.Println("INFO: Logger initialized. Application starting.")
+}
+
 func (a *App) saveCollections() {
 	path, err := getConfigPath("collections.json")
 	if err != nil {
-		return // Mungkin bisa log error
+		log.Printf("ERROR: Could not get config path for collections: %v", err)
+		return
 	}
 	data, err := json.MarshalIndent(a.collectionsRoot, "", "  ")
 	if err != nil {
+		log.Printf("ERROR: Failed to marshal collections: %v", err)
 		return
 	}
-	_ = os.WriteFile(path, data, 0644)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		log.Printf("ERROR: Failed to write collections file: %v", err)
+	}
 }
 
 func (a *App) saveGrpcCache() {
 	path, err := getConfigPath("grpc_cache.json")
 	if err != nil {
+		log.Printf("ERROR: Could not get config path for gRPC cache: %v", err)
 		return
 	}
 	data, err := json.MarshalIndent(a.grpcBodyCache, "", "  ")
 	if err != nil {
+		log.Printf("ERROR: Failed to marshal gRPC cache: %v", err)
 		return
 	}
-	_ = os.WriteFile(path, data, 0644)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		log.Printf("ERROR: Failed to write gRPC cache file: %v", err)
+	}
 }
 
 func (a *App) loadCollections() {
 	path, _ := getConfigPath("collections.json")
-	data, _ := os.ReadFile(path)
-	_ = json.Unmarshal(data, &a.collectionsRoot)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("INFO: Collections file not found, will be created on exit.")
+		return
+	}
+	if err := json.Unmarshal(data, &a.collectionsRoot); err != nil {
+		log.Printf("ERROR: Failed to unmarshal collections: %v", err)
+	}
 }
 
 func (a *App) loadGrpcCache() {
 	path, _ := getConfigPath("grpc_cache.json")
-	data, _ := os.ReadFile(path)
-	_ = json.Unmarshal(data, &a.grpcBodyCache)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("INFO: gRPC cache file not found, will be created on exit.")
+		return
+	}
+	if err := json.Unmarshal(data, &a.grpcBodyCache); err != nil {
+		log.Printf("ERROR: Failed to unmarshal gRPC cache: %v", err)
+	}
 }
 
 func NewApp() *App {
@@ -676,6 +710,7 @@ func (a *App) grpcConnect(onSuccess func()) {
 		conn, err := grpc.DialContext(ctx, serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 		if err != nil {
 			a.app.QueueUpdateDraw(func() {
+				log.Printf("ERROR: gRPC dial failed for %s: %v", serverAddr, err)
 				a.grpcStatusText.SetText(fmt.Sprintf("[red]Failed to connect: %v", err))
 			})
 			return
@@ -690,6 +725,7 @@ func (a *App) grpcConnect(onSuccess func()) {
 		services, err := a.grpcReflectClient.ListServices()
 		if err != nil {
 			a.app.QueueUpdateDraw(func() {
+				log.Printf("ERROR: gRPC reflection ListServices failed: %v", err)
 				a.grpcStatusText.SetText(fmt.Sprintf("[red]Failed to list services: %v", err))
 			})
 			return
@@ -743,6 +779,7 @@ func (a *App) sendGrpcRequest() {
 		// 1. Parse service and method name
 		parts := strings.SplitN(a.grpcCurrentService, "/", 2)
 		if len(parts) != 2 {
+			log.Printf("ERROR: Invalid gRPC service/method format: %s", a.grpcCurrentService)
 			a.app.QueueUpdateDraw(func() {
 				a.grpcStatusText.SetText(fmt.Sprintf("[red]Invalid service/method format: %s", a.grpcCurrentService))
 			})
@@ -753,6 +790,7 @@ func (a *App) sendGrpcRequest() {
 		// 2. Resolve service and then find method descriptor
 		sd, err := a.grpcReflectClient.ResolveService(serviceName)
 		if err != nil {
+			log.Printf("ERROR: Failed to resolve gRPC service '%s': %v", serviceName, err)
 			a.app.QueueUpdateDraw(func() {
 				a.grpcStatusText.SetText(fmt.Sprintf("[red]Error resolving service '%s': %v", serviceName, err))
 			})
@@ -760,6 +798,7 @@ func (a *App) sendGrpcRequest() {
 		}
 		md := sd.FindMethodByName(methodName)
 		if md == nil {
+			log.Printf("ERROR: gRPC method '%s' not found in service '%s'", methodName, serviceName)
 			a.app.QueueUpdateDraw(func() {
 				a.grpcStatusText.SetText(fmt.Sprintf("[red]Method '%s' not found in service '%s'", methodName, serviceName))
 			})
@@ -772,6 +811,7 @@ func (a *App) sendGrpcRequest() {
 		bodyText := a.grpcRequestBody.GetText()
 		if bodyText != "" {
 			if err := dynMsg.UnmarshalJSON([]byte(bodyText)); err != nil {
+				log.Printf("ERROR: Failed to unmarshal gRPC request body JSON: %v", err)
 				a.app.QueueUpdateDraw(func() {
 					a.grpcStatusText.SetText(fmt.Sprintf("[red]Error parsing request body JSON: %v", err))
 				})
@@ -787,6 +827,7 @@ func (a *App) sendGrpcRequest() {
 		if metaText != "" {
 			var metaMap map[string]string
 			if err := json.Unmarshal([]byte(metaText), &metaMap); err != nil {
+				log.Printf("ERROR: Failed to unmarshal gRPC metadata JSON: %v", err)
 				a.app.QueueUpdateDraw(func() {
 					a.grpcStatusText.SetText(fmt.Sprintf("[red]Error parsing metadata JSON: %v", err))
 				})
@@ -796,12 +837,14 @@ func (a *App) sendGrpcRequest() {
 		}
 
 		// 5. Invoke RPC
+		log.Printf("INFO: Invoking gRPC method: %s", a.grpcCurrentService)
 		start := time.Now()
 		resp, err := a.grpcStub.InvokeRpc(ctx, md, dynMsg)
 		duration := time.Since(start)
 
 		a.app.QueueUpdateDraw(func() {
 			if err != nil {
+				log.Printf("ERROR: gRPC InvokeRpc failed for %s: %v", a.grpcCurrentService, err)
 				a.grpcStatusText.SetText(fmt.Sprintf("[red]RPC Error: %v", err))
 				a.grpcResponseView.SetText(fmt.Sprintf("[red]%v", err))
 				return
@@ -810,16 +853,19 @@ func (a *App) sendGrpcRequest() {
 			// 6. Format and display response
 			dynResp, ok := resp.(*dynamic.Message)
 			if !ok {
+				log.Printf("ERROR: Unexpected gRPC response type: %T", resp)
 				a.grpcStatusText.SetText(fmt.Sprintf("[red]Internal Error: Unexpected response type %T", resp))
 				a.grpcResponseView.SetText(fmt.Sprintf("Could not format response: %v", resp))
 				return
 			}
 			respJSON, err := dynResp.MarshalJSONIndent()
 			if err != nil {
+				log.Printf("ERROR: Failed to marshal gRPC response JSON: %v", err)
 				a.grpcStatusText.SetText(fmt.Sprintf("[red]Error formatting response JSON: %v", err))
 				a.grpcResponseView.SetText(fmt.Sprintf("Could not format response JSON: %v", err))
 				return
 			}
+			log.Printf("INFO: gRPC call to %s successful. Duration: %v", a.grpcCurrentService, duration)
 			a.grpcStatusText.SetText(fmt.Sprintf("[green]Success![-] | Duration: [cyan]%v[-]", duration))
 			a.grpcResponseView.SetText(string(respJSON)).ScrollToBeginning()
 		})
@@ -1117,6 +1163,7 @@ func (a *App) sendRequest() {
 
 	req, err := http.NewRequest(method, url, bodyReader)
 	if err != nil {
+		log.Printf("ERROR: Failed to create HTTP request for %s %s: %v", method, url, err)
 		a.statusText.SetText(fmt.Sprintf("[red]Error creating request: %v", err))
 		return
 	}
@@ -1146,6 +1193,7 @@ func (a *App) sendRequest() {
 	}
 
 	// Send request
+	log.Printf("INFO: Sending HTTP request: %s %s", method, url)
 	start := time.Now()
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
@@ -1153,6 +1201,7 @@ func (a *App) sendRequest() {
 
 	if err != nil {
 		a.statusText.SetText(fmt.Sprintf("[red]Error: %v", err))
+		log.Printf("ERROR: HTTP request failed for %s %s: %v", method, url, err)
 		a.responseText.SetText(fmt.Sprintf("[red]Error: %v", err))
 		return
 	}
@@ -1161,6 +1210,7 @@ func (a *App) sendRequest() {
 	// Read response
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		log.Printf("ERROR: Failed to read HTTP response body: %v", err)
 		a.statusText.SetText(fmt.Sprintf("[red]Error reading response: %v", err))
 		return
 	}
@@ -1173,6 +1223,7 @@ func (a *App) sendRequest() {
 		statusColor = "[yellow]"
 	}
 
+	log.Printf("INFO: HTTP request to %s %s completed with status %s. Duration: %v", method, url, resp.Status, duration)
 	a.statusText.SetText(fmt.Sprintf("%s%s[-] | Duration: [cyan]%v[-]",
 		statusColor, resp.Status, duration))
 
@@ -1335,12 +1386,16 @@ func (a *App) Run() error {
 }
 
 func main() {
+	initLogger()
 	app := NewApp()
 	app.Init()
 
 	// Simpan state ke file saat aplikasi keluar
-	defer app.saveCollections()
-	defer app.saveGrpcCache()
+	defer func() {
+		app.saveCollections()
+		app.saveGrpcCache()
+		log.Println("INFO: Application shutting down.")
+	}()
 	if err := app.Run(); err != nil {
 		panic(err)
 	}
