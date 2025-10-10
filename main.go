@@ -64,6 +64,7 @@ type App struct {
 	authPanel       *tview.Flex
 	headersText     *tview.TextArea
 	bodyText        *tview.TextArea
+	headerBar       *tview.Flex
 	responseText    *tview.TextView
 	historyList     *tview.List
 	collectionsTree *tview.TreeView
@@ -230,32 +231,10 @@ func (a *App) Init() {
 	a.bodyText.SetBorder(true).SetTitle("Body")
 	a.bodyText.SetBackgroundColor(tcell.ColorBlack)
 
-	// Send button area
-	buttonFlex := tview.NewFlex()
-	sendBtn := tview.NewButton("Send Request (F5)").SetSelectedFunc(func() {
-		a.sendRequest()
-	})
-	sendBtn.SetBorder(true)
-
-	clearBtn := tview.NewButton("Clear (F6)").SetSelectedFunc(func() {
-		a.clearForm()
-	})
-	clearBtn.SetBorder(true)
-
-	saveBtn := tview.NewButton("Save (F8)").SetSelectedFunc(func() {
-		a.showSaveRequestModal()
-	})
-	saveBtn.SetBorder(true)
-
-	buttonFlex.AddItem(saveBtn, 0, 1, false)
-	buttonFlex.AddItem(sendBtn, 0, 1, false)
-	buttonFlex.AddItem(clearBtn, 0, 1, false)
-
 	leftPanel.AddItem(topFlex, 3, 0, false)
 	leftPanel.AddItem(a.authPanel, 3, 0, false)
 	leftPanel.AddItem(a.headersText, 0, 1, false)
 	leftPanel.AddItem(a.bodyText, 0, 1, false)
-	leftPanel.AddItem(buttonFlex, 3, 0, false)
 
 	// Right panel - Response and History
 	a.httpRightPanel = tview.NewFlex().SetDirection(tview.FlexRow)
@@ -332,12 +311,15 @@ func (a *App) Init() {
 	a.httpRightPanel.AddItem(a.statusText, 3, 0, false).AddItem(a.responseText, 0, 1, false)
 	mainFlex.AddItem(leftPanel, 0, 1, true).AddItem(a.httpRightPanel, 0, 1, false)
 
+	// Inisialisasi input server gRPC di sini agar bisa diakses oleh halaman dan header
+	a.grpcServerInput = tview.NewInputField().SetLabel("Server: ").SetText("localhost:8081").SetFieldBackgroundColor(tcell.ColorBlack)
+
 	// Buat halaman gRPC
 	a.createGrpcPage()
 
 	// Tambahkan header/switcher di atas
-	switcher := a.createModeSwitcher()
-	rootFlex := tview.NewFlex().SetDirection(tview.FlexRow).AddItem(switcher, 1, 0, false).AddItem(a.rootPages, 0, 1, true)
+	a.headerBar = a.createHeaderBar()
+	rootFlex := tview.NewFlex().SetDirection(tview.FlexRow).AddItem(a.headerBar, 1, 0, false).AddItem(a.rootPages, 0, 1, true)
 
 	// Buat panel explorer di sebelah kiri
 	a.explorerPanel = tview.NewFlex().SetDirection(tview.FlexRow)
@@ -391,7 +373,13 @@ Press Esc to close this help.`)
 	a.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyF5:
-			a.sendRequest()
+			// Kirim request berdasarkan mode aktif
+			currentPage, _ := a.rootPages.GetFrontPage()
+			if currentPage == "http" {
+				a.sendRequest()
+			} else {
+				a.sendGrpcRequest()
+			}
 			return nil
 		case tcell.KeyF6:
 			a.clearForm()
@@ -425,21 +413,42 @@ Press Esc to close this help.`)
 	a.app.SetFocus(a.urlInput)
 }
 
-func (a *App) createModeSwitcher() tview.Primitive {
-	textView := tview.NewTextView().
-		SetDynamicColors(true).
-		SetTextAlign(tview.AlignCenter).
-		SetText("HTTP Client [yellow](F12 to switch)[-]")
+func (a *App) createHeaderBar() *tview.Flex {
+	header := tview.NewFlex()
 
+	switchModeBtn := tview.NewButton("Switch (F12)").SetSelectedFunc(a.switchMode)
+
+	// Definisikan semua tombol
+	httpSendBtn := tview.NewButton("Send (F5)").SetSelectedFunc(a.sendRequest)
+	clearBtn := tview.NewButton("Clear (F6)").SetSelectedFunc(a.clearForm)
+	saveBtn := tview.NewButton("Save (F8)").SetSelectedFunc(a.showSaveRequestModal)
+	grpcSendBtn := tview.NewButton("Send (F5)").SetSelectedFunc(a.sendGrpcRequest)
+
+	// Atur ulang header saat mode berubah
 	a.rootPages.SetChangedFunc(func() {
 		page, _ := a.rootPages.GetFrontPage()
+		header.Clear() // Hapus semua item lama
+
 		if page == "http" {
-			textView.SetText("HTTP Client [yellow](F12 to switch)[-]")
+			header.AddItem(httpSendBtn, 0, 1, false).
+				AddItem(clearBtn, 0, 1, false).
+				AddItem(saveBtn, 0, 1, false).
+				AddItem(switchModeBtn, 0, 1, false)
 		} else {
-			textView.SetText("gRPC Client [yellow](F12 to switch)[-]")
+			// Tombol Connect dan input server sekarang ada di dalam halaman gRPC
+			header.AddItem(grpcSendBtn, 0, 1, false).
+				AddItem(saveBtn, 0, 1, false).
+				AddItem(switchModeBtn, 0, 1, false)
 		}
 	})
-	return textView
+
+	// Atur state awal untuk mode HTTP
+	header.AddItem(httpSendBtn, 0, 1, false).
+		AddItem(clearBtn, 0, 1, false).
+		AddItem(saveBtn, 0, 1, false).
+		AddItem(switchModeBtn, 0, 1, false)
+
+	return header
 }
 
 func (a *App) switchMode() {
@@ -458,12 +467,6 @@ func (a *App) createGrpcPage() {
 	grpcFlex := tview.NewFlex()
 
 	// Panel Kiri: Server & Services
-	leftPanel := tview.NewFlex().SetDirection(tview.FlexRow)
-	serverInputFlex := tview.NewFlex()
-	a.grpcServerInput = tview.NewInputField().SetLabel("Server: ").SetText("localhost:8081")
-	connectBtn := tview.NewButton("Connect").SetSelectedFunc(a.grpcConnect)
-	serverInputFlex.AddItem(a.grpcServerInput, 0, 1, true).AddItem(connectBtn, 10, 0, false)
-
 	a.grpcServiceTree = tview.NewTreeView()
 	a.grpcServiceTree.SetBorder(true).SetTitle("Services")
 	a.grpcServiceTree.SetSelectedFunc(func(node *tview.TreeNode) {
@@ -490,27 +493,35 @@ func (a *App) createGrpcPage() {
 		}
 	})
 
-	leftPanel.AddItem(serverInputFlex, 1, 0, true)
-	leftPanel.AddItem(a.grpcServiceTree, 0, 1, false)
+	// Konten utama di sebelah kanan service tree
+	mainContent := tview.NewFlex().SetDirection(tview.FlexRow)
 
-	// Panel Tengah: Request
+	// Baris atas: Input Server dan Status
+	topRow := tview.NewFlex()
+	serverInputFlex := tview.NewFlex().
+		AddItem(a.grpcServerInput, 0, 1, true).
+		AddItem(tview.NewButton("Connect").SetSelectedFunc(func() { a.grpcConnect(nil) }), 12, 0, false)
+	serverInputFlex.SetBorder(true).SetTitle("Server")
+
+	a.grpcStatusText = tview.NewTextView().SetDynamicColors(true).SetText("[yellow]Not connected")
+	a.grpcStatusText.SetBorder(true).SetTitle("Status")
+	topRow.AddItem(serverInputFlex, 0, 1, true).AddItem(a.grpcStatusText, 0, 1, false)
+
+	// Baris bawah: Request dan Response
+	bottomRow := tview.NewFlex()
 	middlePanel := tview.NewFlex().SetDirection(tview.FlexRow)
 	a.grpcRequestMeta = tview.NewTextArea().SetPlaceholder("Metadata (JSON format)...")
 	a.grpcRequestMeta.SetBorder(true).SetTitle("Metadata")
 	a.grpcRequestBody = tview.NewTextArea().SetPlaceholder("Select a service method to see the request body template...")
 	a.grpcRequestBody.SetBorder(true).SetTitle("Request Body")
-	sendGrpcBtn := tview.NewButton("Send (F5)").SetSelectedFunc(a.sendGrpcRequest)
-	middlePanel.AddItem(a.grpcRequestMeta, 0, 1, false).AddItem(a.grpcRequestBody, 0, 2, false).AddItem(sendGrpcBtn, 1, 0, false)
+	middlePanel.AddItem(a.grpcRequestMeta, 0, 1, false).AddItem(a.grpcRequestBody, 0, 2, false)
 
-	// Panel Kanan: Response
-	rightPanel := tview.NewFlex().SetDirection(tview.FlexRow)
-	a.grpcStatusText = tview.NewTextView().SetDynamicColors(true).SetText("[yellow]Not connected")
-	a.grpcStatusText.SetBorder(true).SetTitle("Status")
 	a.grpcResponseView = tview.NewTextView().SetDynamicColors(true).SetScrollable(true).SetWordWrap(true)
 	a.grpcResponseView.SetBorder(true).SetTitle("Response")
-	rightPanel.AddItem(a.grpcStatusText, 3, 0, false).AddItem(a.grpcResponseView, 0, 1, false)
+	bottomRow.AddItem(middlePanel, 0, 1, false).AddItem(a.grpcResponseView, 0, 1, false)
 
-	grpcFlex.AddItem(leftPanel, 30, 0, true).AddItem(middlePanel, 0, 1, false).AddItem(rightPanel, 0, 1, false)
+	mainContent.AddItem(topRow, 3, 0, true).AddItem(bottomRow, 0, 1, false)
+	grpcFlex.AddItem(a.grpcServiceTree, 30, 0, true).AddItem(mainContent, 0, 1, false)
 	a.rootPages.AddPage("grpc", grpcFlex, true, false)
 }
 
@@ -633,14 +644,14 @@ func getZeroValue(fd protoreflect.FieldDescriptor) interface{} {
 	}
 }
 
-func (a *App) grpcConnect() {
+func (a *App) grpcConnect(onSuccess func()) {
 	serverAddr := a.grpcServerInput.GetText()
 	if serverAddr == "" {
 		a.grpcStatusText.SetText("[red]Server address is required")
 		return
 	}
 
-	// Update status di UI dan jalankan koneksi di goroutine agar tidak hang
+	// Update status di UI dan jalankan koneksi di goroutine agar tidak membeku
 	a.grpcStatusText.SetText(fmt.Sprintf("[yellow]Connecting to %s...", serverAddr))
 
 	go func() {
@@ -697,6 +708,10 @@ func (a *App) grpcConnect() {
 			}
 
 			a.grpcStatusText.SetText(fmt.Sprintf("[green]Connected to %s. Found %d services.", serverAddr, len(services)-1))
+			// Jalankan callback jika koneksi dan discovery berhasil
+			if onSuccess != nil {
+				onSuccess()
+			}
 		})
 	}()
 }
@@ -1209,15 +1224,48 @@ func (a *App) loadGrpcRequest(req Request) {
 	// Pindah ke halaman gRPC
 	a.rootPages.SwitchToPage("grpc")
 
-	// Isi field dari data yang tersimpan
+	// 1. Isi field dari data yang tersimpan
 	a.grpcServerInput.SetText(req.GrpcServer)
 	a.grpcRequestMeta.SetText(req.GrpcMetadata, false)
 	a.grpcRequestBody.SetText(req.Body, false)
 
-	// Simpan body yang dimuat ke cache
+	// 2. Perbarui status dan service yang aktif
+	a.grpcCurrentService = req.GrpcMethod
+	if a.grpcCurrentService != "" {
+		a.grpcStatusText.SetText(fmt.Sprintf("Selected: [green]%s", a.grpcCurrentService))
+	}
+
+	// 3. Simpan body yang dimuat ke cache agar tidak hilang saat beralih
 	if req.GrpcMethod != "" {
 		a.grpcBodyCache[req.GrpcMethod] = req.Body
 	}
+
+	// 4. Definisikan callback yang akan dijalankan setelah koneksi berhasil
+	onConnectSuccess := func() {
+		if req.GrpcMethod == "" {
+			return
+		}
+
+		// Cari node di tree yang sesuai dengan method yang disimpan
+		var targetNode *tview.TreeNode
+		a.grpcServiceTree.GetRoot().Walk(func(node, parent *tview.TreeNode) bool {
+			if ref := node.GetReference(); ref != nil {
+				if serviceName, ok := ref.(string); ok && serviceName == req.GrpcMethod {
+					targetNode = node
+					return false // Hentikan pencarian
+				}
+			}
+			return true // Lanjutkan pencarian
+		})
+
+		// Jika ditemukan, pilih node tersebut
+		if targetNode != nil {
+			a.grpcServiceTree.SetCurrentNode(targetNode)
+		}
+	}
+
+	// 5. Panggil grpcConnect dengan callback untuk otomatis terhubung dan memilih method
+	a.grpcConnect(onConnectSuccess)
 	a.app.SetFocus(a.grpcServerInput)
 }
 
