@@ -17,7 +17,7 @@ func getConfigPath(filename string) (string, error) {
 		return "", fmt.Errorf("could not get user config dir: %w", err)
 	}
 
-	appConfigDir := filepath.Join(configDir, "myhttp")
+	appConfigDir := filepath.Join(configDir, "panggil")
 	if err := os.MkdirAll(appConfigDir, 0755); err != nil {
 		return "", fmt.Errorf("could not create app config dir: %w", err)
 	}
@@ -28,7 +28,7 @@ func getConfigPath(filename string) (string, error) {
 // initLogger sets up the application's logger to write to a file.
 // initLogger mengatur logger aplikasi untuk menulis log ke sebuah file.
 func initLogger() {
-	path, err := getConfigPath("myhttp.log")
+	path, err := getConfigPath("panggil.log")
 	if err != nil {
 		log.Fatalf("FATAL: Failed to get log file path: %v", err)
 	}
