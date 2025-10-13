@@ -536,9 +536,15 @@ func (a *App) createGrpcPage() {
 
 	// --- Live Search Method Selector ---
 	a.grpcMethodInput = tview.NewInputField().SetLabel("Method: ").SetFieldBackgroundColor(tcell.ColorBlack)
+	clearMethodButton := tview.NewButton("X").SetSelectedFunc(func() {
+		a.grpcMethodInput.SetText("") // This will trigger the ChangedFunc
+		a.app.SetFocus(a.grpcMethodInput)
+	})
+	methodInputRow := tview.NewFlex().AddItem(a.grpcMethodInput, 0, 1, true).AddItem(clearMethodButton, 3, 0, false)
+
 	a.grpcMethodList = tview.NewList().ShowSecondaryText(false)
 	a.grpcMethodSelector = tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(a.grpcMethodInput, 1, 1, true).
+		AddItem(methodInputRow, 1, 1, true).
 		AddItem(a.grpcMethodList, 0, 1, false) // List disembunyikan awalnya
 	a.grpcMethodSelector.SetBorder(true).SetTitle("Service Method")
 
@@ -568,6 +574,7 @@ func (a *App) createGrpcPage() {
 			return nil
 		}
 		if event.Key() == tcell.KeyEsc {
+			// Jika daftar hasil sedang ditampilkan, sembunyikan.
 			a.hideMethodList()
 			return nil
 		}
@@ -711,12 +718,13 @@ func (a *App) selectGrpcMethod(methodName string) {
 	a.grpcCurrentService = methodName
 	a.grpcMethodInput.SetText(methodName)
 	a.grpcStatusText.SetText(fmt.Sprintf("Selected: [green]%s", methodName))
+
+	// Selalu bersihkan form dan generate template baru saat metode diganti
 	a.grpcResponseView.SetText("")
-	if cachedBody, exists := a.grpcBodyCache[methodName]; exists {
-		a.grpcRequestBody.SetText(cachedBody, true)
-	} else {
-		a.grpcRequestBody.SetText("", true)
-	}
+	a.grpcRequestMeta.SetText("", true)
+	a.grpcRequestBody.SetText("", true)        // Kosongkan dulu
+	a.generateGrpcBodyTemplate(methodName, "") // Langsung generate template baru
+
 	a.hideMethodList()
 	a.app.SetFocus(a.grpcRequestBody)
 }
