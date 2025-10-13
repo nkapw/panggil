@@ -35,7 +35,7 @@ You need to have Go (version 1.18 or newer) installed on your system.
 1.  **Clone the repository:**
     *(Clone repositori ini:)*
     ```sh
-    git clone https://github.com/your-username/panggil.git
+    git clone https://github.com/nkapw/panggil.git
     cd panggil
     ```
 
