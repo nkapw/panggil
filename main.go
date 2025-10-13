@@ -76,7 +76,9 @@ type App struct {
 	// gRPC components
 	grpcPages            *tview.Pages
 	grpcServerInput      *tview.InputField
-	grpcServiceTree      *tview.TreeView
+	grpcMethodInput      *tview.InputField
+	grpcMethodList       *tview.List
+	grpcMethodSelector   *tview.Flex
 	grpcRequestMeta      *tview.TextArea
 	grpcRequestBody      *tview.TextArea
 	grpcResponseView     *tview.TextView
@@ -85,6 +87,8 @@ type App struct {
 	grpcStub             grpcdynamic.Stub
 	grpcConn             *grpc.ClientConn
 	grpcCurrentService   string
+	grpcAvailableMethods []string
+	grpcAllMethods       []string          // Menyimpan semua method yang ditemukan dari server
 	grpcBodyCache        map[string]string // Cache untuk body request gRPC
 	explorerPanelVisible bool
 	isLoadingRequest     bool // Flag untuk mencegah side-effect saat memuat request
@@ -530,39 +534,67 @@ func (a *App) createGrpcPage() {
 	// Layout utama gRPC
 	grpcFlex := tview.NewFlex()
 
-	// Panel Kiri: Server & Services
-	a.grpcServiceTree = tview.NewTreeView()
-	a.grpcServiceTree.SetBorder(true).SetTitle("Services")
-	a.grpcServiceTree.SetSelectedFunc(func(node *tview.TreeNode) {
-		ref := node.GetReference()
-		if ref == nil {
+	// --- Live Search Method Selector ---
+	a.grpcMethodInput = tview.NewInputField().SetLabel("Method: ").SetFieldBackgroundColor(tcell.ColorBlack)
+	a.grpcMethodList = tview.NewList().ShowSecondaryText(false)
+	a.grpcMethodSelector = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(a.grpcMethodInput, 1, 1, true).
+		AddItem(a.grpcMethodList, 0, 1, false) // List disembunyikan awalnya
+	a.grpcMethodSelector.SetBorder(true).SetTitle("Service Method")
+
+	// Logika Live Search
+	a.grpcMethodInput.SetChangedFunc(func(text string) {
+		a.updateGrpcMethodList(text)
+	})
+
+	// Done func untuk seleksi cepat dengan Enter
+	a.grpcMethodInput.SetDoneFunc(func(key tcell.Key) {
+		if key == tcell.KeyEnter {
+			// Hanya pilih jika ada hasil yang valid (bukan "No results found")
+			if len(a.grpcAvailableMethods) > 0 {
+				// Ambil item pertama dari daftar hasil yang difilter
+				selectedMethod := a.grpcAvailableMethods[0]
+				a.selectGrpcMethod(selectedMethod)
+			}
+		} else if key == tcell.KeyEsc {
+			a.hideMethodList()
+			a.app.SetFocus(a.grpcRequestBody)
+		}
+	})
+	// Navigasi dari Input ke List
+	a.grpcMethodInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyDown && a.grpcMethodList.GetItemCount() > 0 {
+			a.app.SetFocus(a.grpcMethodList)
+			return nil
+		}
+		if event.Key() == tcell.KeyEsc {
+			a.hideMethodList()
+			return nil
+		}
+		return event
+	})
+
+	// Logika saat item di list dipilih
+	a.grpcMethodList.SetSelectedFunc(func(index int, mainText, secondaryText string, shortcut rune) {
+		// Jangan lakukan apa-apa jika item "No results found" yang dipilih
+		if mainText == "[gray]No results found" {
 			return
 		}
-		// Simpan service/method yang dipilih
-		if serviceName, ok := ref.(string); ok && len(node.GetChildren()) == 0 {
-			// 1. Simpan body dari method sebelumnya (jika ada) ke cache
-			if a.grpcCurrentService != "" {
-				a.grpcBodyCache[a.grpcCurrentService] = a.grpcRequestBody.GetText()
-			}
+		a.selectGrpcMethod(mainText)
+	})
 
-			// 2. Atur method baru sebagai yang aktif
-			a.grpcCurrentService = serviceName
-			a.grpcStatusText.SetText(fmt.Sprintf("Selected: [green]%s", serviceName))
-			a.grpcResponseView.SetText("") // Hapus respons sebelumnya
-			// Biarkan request body tidak berubah saat memilih method baru.
-
-			log.Printf("a.grpcBodyCache[serviceName]: %v\n", a.grpcBodyCache[serviceName])
-			// 3. Muat body dari cache jika ada, atau kosongkan
-			if cachedBody, exists := a.grpcBodyCache[serviceName]; exists {
-				a.grpcRequestBody.SetText(cachedBody, true)
-			} else {
-				a.grpcRequestBody.SetText("", true)
-			}
-
-		} else {
-			// Jika yang dipilih adalah folder (service), buka/tutup saja
-			node.SetExpanded(!node.IsExpanded())
+	// Navigasi dari List kembali ke Input atau tutup
+	a.grpcMethodList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEsc {
+			a.hideMethodList()
+			a.app.SetFocus(a.grpcMethodInput)
+			return nil
 		}
+		if event.Key() == tcell.KeyUp && a.grpcMethodList.GetCurrentItem() == 0 {
+			a.app.SetFocus(a.grpcMethodInput)
+			return nil
+		}
+		return event
 	})
 
 	// Konten utama di sebelah kanan service tree
@@ -577,7 +609,7 @@ func (a *App) createGrpcPage() {
 
 	a.grpcStatusText = tview.NewTextView().SetDynamicColors(true).SetText("[yellow]Not connected")
 	a.grpcStatusText.SetBorder(true).SetTitle("Status")
-	topRow.AddItem(serverInputFlex, 0, 1, true).AddItem(a.grpcStatusText, 0, 1, false)
+	topRow.AddItem(serverInputFlex, 40, 0, true).AddItem(a.grpcMethodSelector, 0, 1, false)
 
 	// Baris bawah: Request dan Response
 	bottomRow := tview.NewFlex()
@@ -606,9 +638,87 @@ func (a *App) createGrpcPage() {
 	a.grpcResponseView.SetBorder(true).SetTitle("Response")
 	bottomRow.AddItem(middlePanel, 0, 1, false).AddItem(a.grpcResponseView, 0, 1, false)
 
-	mainContent.AddItem(topRow, 3, 0, true).AddItem(bottomRow, 0, 1, false)
-	grpcFlex.AddItem(a.grpcServiceTree, 30, 0, true).AddItem(mainContent, 0, 1, false)
+	mainContent.AddItem(topRow, 3, 0, true).AddItem(a.grpcStatusText, 3, 0, false).AddItem(bottomRow, 0, 1, false)
+	grpcFlex.AddItem(mainContent, 0, 1, false)
 	a.rootPages.AddPage("grpc", grpcFlex, true, false)
+}
+
+// fuzzyFind melakukan pencarian sederhana yang tidak peka huruf besar-kecil
+// dan memeriksa apakah semua karakter dalam query muncul dalam target secara berurutan.
+func fuzzyFind(query, target string) bool {
+	query = strings.ToLower(query)
+	target = strings.ToLower(target)
+
+	queryIndex := 0
+	for targetIndex := 0; targetIndex < len(target) && queryIndex < len(query); targetIndex++ {
+		if query[queryIndex] == target[targetIndex] {
+			queryIndex++
+		}
+	}
+
+	return queryIndex == len(query)
+}
+
+func (a *App) updateGrpcMethodList(query string) {
+	a.grpcMethodList.Clear()
+
+	// Jika query kosong, sembunyikan daftar dan keluar.
+	if query == "" {
+		a.grpcAvailableMethods = nil // Kosongkan hasil pencarian
+		a.hideMethodList()
+		return
+	}
+
+	var matchedMethods []string
+	if query != "" {
+		// Selalu cari dari daftar lengkap
+		for _, method := range a.grpcAllMethods {
+			if fuzzyFind(query, method) {
+				matchedMethods = append(matchedMethods, method)
+			}
+		}
+	}
+
+	// Simpan hasil yang cocok untuk referensi nanti
+	a.grpcAvailableMethods = matchedMethods
+
+	if len(matchedMethods) > 0 {
+		for _, method := range matchedMethods {
+			a.grpcMethodList.AddItem(method, "", 0, nil)
+		}
+		// Tampilkan list dengan tinggi maksimal 8 baris
+		listHeight := a.grpcMethodList.GetItemCount()
+		if listHeight > 8 {
+			listHeight = 8
+		}
+		a.grpcMethodSelector.ResizeItem(a.grpcMethodList, listHeight, 1)
+	} else {
+		// Tampilkan pesan "No results" jika tidak ada yang cocok.
+		// Ini hanya akan terjadi jika query tidak kosong dan tidak ada hasil.
+		a.grpcMethodList.AddItem("[gray]No results found", "", 0, nil)
+		a.grpcMethodSelector.ResizeItem(a.grpcMethodList, 1, 1)
+	}
+}
+
+func (a *App) hideMethodList() {
+	a.grpcMethodSelector.ResizeItem(a.grpcMethodList, 0, 0)
+}
+
+func (a *App) selectGrpcMethod(methodName string) {
+	if a.grpcCurrentService != "" && a.grpcCurrentService != methodName {
+		a.grpcBodyCache[a.grpcCurrentService] = a.grpcRequestBody.GetText()
+	}
+	a.grpcCurrentService = methodName
+	a.grpcMethodInput.SetText(methodName)
+	a.grpcStatusText.SetText(fmt.Sprintf("Selected: [green]%s", methodName))
+	a.grpcResponseView.SetText("")
+	if cachedBody, exists := a.grpcBodyCache[methodName]; exists {
+		a.grpcRequestBody.SetText(cachedBody, true)
+	} else {
+		a.grpcRequestBody.SetText("", true)
+	}
+	a.hideMethodList()
+	a.app.SetFocus(a.grpcRequestBody)
 }
 
 func (a *App) generateGrpcBodyTemplate(fullMethodName, existingBody string) {
@@ -760,27 +870,28 @@ func (a *App) grpcConnect(onSuccess func()) {
 
 		// Kirim pembaruan UI kembali ke thread utama
 		a.app.QueueUpdateDraw(func() {
-			root := tview.NewTreeNode("Services").SetColor(tcell.ColorRed)
-			a.grpcServiceTree.SetRoot(root).SetCurrentNode(root)
+			var serviceMethods []string
 			for _, srv := range services {
 				if srv == "grpc.reflection.v1alpha.ServerReflection" {
 					continue
 				}
-				srvNode := tview.NewTreeNode(srv).SetColor(tcell.ColorGreen)
-				root.AddChild(srvNode)
 
 				sd, err := a.grpcReflectClient.ResolveService(srv)
 				if err != nil {
 					continue
 				}
 				for _, md := range sd.GetMethods() {
-					methodName := fmt.Sprintf("%s/%s", srv, md.GetName())
-					methodNode := tview.NewTreeNode(md.GetName()).SetReference(methodName).SetSelectable(true)
-					srvNode.AddChild(methodNode)
+					serviceMethods = append(serviceMethods, fmt.Sprintf("%s/%s", srv, md.GetName()))
 				}
 			}
 
+			a.grpcAllMethods = serviceMethods       // Simpan daftar lengkap
+			a.grpcAvailableMethods = serviceMethods // Awalnya, semua tersedia
+			// Reset tombol dan status
+			a.grpcMethodInput.SetText("")
+			a.grpcMethodInput.SetPlaceholder("Type to search for a method...")
 			a.grpcStatusText.SetText(fmt.Sprintf("[green]Connected to %s. Found %d services.", serverAddr, len(services)-1))
+
 			// Jalankan callback jika koneksi dan discovery berhasil
 			if onSuccess != nil {
 				onSuccess()
@@ -1403,6 +1514,7 @@ func (a *App) loadGrpcRequest(req Request) {
 	// Ini adalah data yang benar dan tidak boleh ditimpa.
 	a.grpcServerInput.SetText(req.GrpcServer)
 	a.grpcRequestMeta.SetText(req.GrpcMetadata, false)
+	a.grpcMethodInput.SetText(req.GrpcMethod)
 	a.grpcRequestBody.SetText(req.Body, false)
 	a.grpcCurrentService = req.GrpcMethod
 	a.grpcStatusText.SetText(fmt.Sprintf("Loaded: [green]%s[-]", req.Name))
@@ -1416,24 +1528,8 @@ func (a *App) loadGrpcRequest(req Request) {
 	// Callback ini SEKARANG HANYA bertugas memilih node di pohon layanan.
 	onConnectSuccess := func() {
 		a.grpcCurrentService = req.GrpcMethod
-		// Cari node di tree yang sesuai dengan method yang disimpan
-		var targetNode *tview.TreeNode
-		a.grpcServiceTree.GetRoot().Walk(func(node, parent *tview.TreeNode) bool {
-			if ref := node.GetReference(); ref != nil {
-				if serviceName, ok := ref.(string); ok && serviceName == req.GrpcMethod {
-					targetNode = node
-					return false // Hentikan pencarian
-				}
-			}
-			return true // Lanjutkan pencarian
-		})
-
-		// Jika ditemukan, pilih node tersebut
-		if targetNode != nil {
-			a.app.QueueUpdateDraw(func() {
-				a.grpcServiceTree.SetCurrentNode(targetNode)
-			})
-		}
+		// Cukup update teks di input field, karena data lain sudah dimuat.
+		a.grpcMethodInput.SetText(req.GrpcMethod)
 	}
 
 	// 5. Panggil grpcConnect dengan callback untuk otomatis terhubung dan memilih method
