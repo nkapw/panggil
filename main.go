@@ -5,158 +5,84 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 	"google.golang.org/protobuf/reflect/protoreflect"
-
-	"net/http"
 
 	"github.com/jhump/protoreflect/dynamic"
 	"github.com/jhump/protoreflect/dynamic/grpcdynamic"
 	"github.com/jhump/protoreflect/grpcreflect"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
+
 	"google.golang.org/grpc/metadata"
 )
 
-type Request struct {
-	Name    string            `json:"name"`
-	Method  string            `json:"method,omitempty"` // For HTTP
-	URL     string            `json:"url,omitempty"`    // For HTTP
-	Headers map[string]string `json:"headers,omitempty"`
-	Body    string            `json:"body"`
-	Time    time.Time         `json:"time"`
-
-	Type         string `json:"type"` // "http" or "grpc"
-	GrpcServer   string `json:"grpc_server,omitempty"`
-	GrpcMethod   string `json:"grpc_method,omitempty"`
-	GrpcMetadata string `json:"grpc_metadata,omitempty"`
-}
-
-type CollectionNode struct {
-	Name     string            `json:"name"`
-	IsFolder bool              `json:"is_folder"`
-	Request  *Request          `json:"request,omitempty"`
-	Children []*CollectionNode `json:"children,omitempty"`
-	Expanded bool              `json:"-"` // Dikecualikan dari JSON
-}
-
+// App encapsulates all the components and state of the TUI application.
+// App membungkus semua komponen dan state dari aplikasi TUI.
 type App struct {
-	app             *tview.Application
-	rootPages       *tview.Pages // Halaman utama untuk beralih antara HTTP dan gRPC
-	contentLayout   *tview.Flex  // Layout untuk explorer dan halaman utama
-	appLayout       *tview.Flex  // Layout paling atas aplikasi
-	explorerPanel   *tview.Flex  // Panel kiri untuk Collections/History
-	httpRightPanel  *tview.Flex  // Referensi ke panel kanan di view HTTP
-	methodDrop      *tview.DropDown
-	urlInput        *tview.InputField
-	authType        *tview.DropDown
-	authToken       *tview.InputField
-	authUser        *tview.InputField
-	authPass        *tview.InputField
-	authPanel       *tview.Flex
-	headersText     *tview.TextArea
-	bodyText        *tview.TextArea
-	headerBar       *tview.Flex
-	responseText    *tview.TextView
-	historyList     *tview.List
-	collectionsTree *tview.TreeView
-	statusText      *tview.TextView
+	app       *tview.Application
+	rootPages *tview.Pages // Main pages for switching between HTTP and gRPC views. / Halaman utama untuk beralih antara view HTTP dan gRPC.
+	// Layout for the explorer panel and main content. / Layout untuk explorer panel dan content utama.
+	contentLayout *tview.Flex
+	appLayout     *tview.Flex // The top-level layout of the entire application. / Layout tingkat atas dari seluruh aplikasi.
+	explorerPanel *tview.Flex // The left panel for Collections and History. / Panel kiri untuk Collections dan History.
+	headerBar     *tview.Flex
+
+	// Core application state / State inti aplikasi
 	history         []Request
 	collectionsRoot *CollectionNode
 
-	// gRPC components
-	grpcPages            *tview.Pages
-	grpcServerInput      *tview.InputField
-	grpcMethodInput      *tview.InputField
-	grpcMethodList       *tview.List
-	grpcMethodSelector   *tview.Flex
-	grpcRequestMeta      *tview.TextArea
-	grpcRequestBody      *tview.TextArea
-	grpcResponseView     *tview.TextView
-	grpcStatusText       *tview.TextView
+	// HTTP view components / Komponen view HTTP
+	// Reference to the right panel in the HTTP view. / Referensi ke panel kanan di view HTTP.
+	httpRightPanel *tview.Flex
+	methodDrop     *tview.DropDown
+	urlInput       *tview.InputField
+	authType       *tview.DropDown
+	authToken      *tview.InputField
+	authUser       *tview.InputField
+	authPass       *tview.InputField
+	authPanel      *tview.Flex
+	headersText    *tview.TextArea
+	bodyText       *tview.TextArea
+	responseText   *tview.TextView
+	statusText     *tview.TextView // Shared status text for HTTP view / Teks status bersama untuk view HTTP
+
+	// gRPC view components / Komponen view gRPC
+	grpcServerInput    *tview.InputField
+	grpcMethodInput    *tview.InputField
+	grpcMethodList     *tview.List
+	grpcMethodSelector *tview.Flex
+	grpcRequestMeta    *tview.TextArea
+	grpcRequestBody    *tview.TextArea
+	grpcResponseView   *tview.TextView
+	grpcStatusText     *tview.TextView
+
+	// gRPC client and reflection state / State client gRPC dan reflection
 	grpcReflectClient    *grpcreflect.Client
 	grpcStub             grpcdynamic.Stub
 	grpcConn             *grpc.ClientConn
 	grpcCurrentService   string
 	grpcAvailableMethods []string
-	grpcAllMethods       []string          // Menyimpan semua method yang ditemukan dari server
-	grpcBodyCache        map[string]string // Cache untuk body request gRPC
+	grpcAllMethods       []string
+	grpcBodyCache        map[string]string
+
+	// Shared UI components / Komponen UI bersama
+	historyList     *tview.List
+	collectionsTree *tview.TreeView
+
+	// UI state flags / Flag untuk state UI
 	explorerPanelVisible bool
-	isLoadingRequest     bool // Flag untuk mencegah side-effect saat memuat request
-	currentPage          string
 }
 
-// getConfigPath mengembalikan path absolut untuk file konfigurasi,
-// memastikan file tersebut disimpan di direktori konfigurasi pengguna yang sesuai.
-func getConfigPath(filename string) (string, error) {
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("could not get user config dir: %w", err)
-	}
-
-	appConfigDir := filepath.Join(configDir, "myhttp")
-	if err := os.MkdirAll(appConfigDir, 0755); err != nil {
-		return "", fmt.Errorf("could not create app config dir: %w", err)
-	}
-
-	return filepath.Join(appConfigDir, filename), nil
-}
-
-func initLogger() {
-	path, err := getConfigPath("myhttp.log")
-	if err != nil {
-		log.Fatalf("FATAL: Failed to get log file path: %v", err)
-	}
-
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-	if err != nil {
-		log.Fatalf("FATAL: error opening log file: %v", err)
-	}
-	log.SetOutput(f)
-	log.Println("INFO: Logger initialized. Application starting.")
-}
-
-func (a *App) saveCollections() {
-	path, err := getConfigPath("collections.json")
-	if err != nil {
-		log.Printf("ERROR: Could not get config path for collections: %v", err)
-		return
-	}
-	data, err := json.MarshalIndent(a.collectionsRoot, "", "  ")
-	if err != nil {
-		log.Printf("ERROR: Failed to marshal collections: %v", err)
-		return
-	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		log.Printf("ERROR: Failed to write collections file: %v", err)
-	}
-}
-
-func (a *App) saveGrpcCache() {
-	path, err := getConfigPath("grpc_cache.json")
-	if err != nil {
-		log.Printf("ERROR: Could not get config path for gRPC cache: %v", err)
-		return
-	}
-	data, err := json.MarshalIndent(a.grpcBodyCache, "", "  ")
-	if err != nil {
-		log.Printf("ERROR: Failed to marshal gRPC cache: %v", err)
-		return
-	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		log.Printf("ERROR: Failed to write gRPC cache file: %v", err)
-	}
-}
-
+// loadCollections reads the collections data from a JSON file in the config directory.
+// loadCollections membaca data collections dari file JSON di direktori config.
 func (a *App) loadCollections() {
 	path, _ := getConfigPath("collections.json")
 	data, err := os.ReadFile(path)
@@ -169,6 +95,8 @@ func (a *App) loadCollections() {
 	}
 }
 
+// loadGrpcCache reads the gRPC request body cache from a JSON file.
+// loadGrpcCache membaca cache body request gRPC dari file JSON.
 func (a *App) loadGrpcCache() {
 	path, _ := getConfigPath("grpc_cache.json")
 	data, err := os.ReadFile(path)
@@ -181,6 +109,8 @@ func (a *App) loadGrpcCache() {
 	}
 }
 
+// NewApp creates and initializes a new App instance.
+// NewApp membuat dan menginisialisasi instance App baru.
 func NewApp() *App {
 	app := &App{
 		app:     tview.NewApplication().EnableMouse(true),
@@ -191,123 +121,29 @@ func NewApp() *App {
 			Expanded: true,
 		},
 		grpcBodyCache:        make(map[string]string),
-		explorerPanelVisible: false, // Sembunyikan explorer panel secara default
+		explorerPanelVisible: false, // Explorer panel is hidden by default. / Explorer panel disembunyikan secara default.
 	}
-	// Muat koleksi yang ada, jika tidak ada, root akan tetap ada
 	app.loadCollections()
-	// Muat cache gRPC yang ada
 	app.loadGrpcCache()
 	return app
 }
 
+// Init initializes all UI components, layouts, and keybindings.
+// Init menginisialisasi semua komponen UI, layout, dan keybindings.
 func (a *App) Init() {
-	// Main layout
-	mainFlex := tview.NewFlex()
+	httpPage := a.createHttpPage()
 
-	// Root pages untuk switch HTTP/gRPC
+	// The rootPages container allows switching between different main views.
+	// Container rootPages memungkinkan pergantian antara view utama yang berbeda.
 	a.rootPages = tview.NewPages()
 	a.app.SetRoot(a.rootPages, true)
-	a.rootPages.AddPage("http", mainFlex, true, true)
+	a.rootPages.AddPage("http", httpPage, true, true)
 
-	// Left panel - Request
-	leftPanel := tview.NewFlex().SetDirection(tview.FlexRow)
-
-	// Method and URL
-	topFlex := tview.NewFlex()
-
-	a.methodDrop = tview.NewDropDown().
-		SetLabel("Method: ").
-		SetOptions([]string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}, nil).
-		SetCurrentOption(0)
-	a.methodDrop.SetBorder(true)
-
-	a.urlInput = tview.NewInputField().
-		SetLabel("URL: ").
-		SetText("").
-		SetFieldBackgroundColor(tcell.ColorBlack)
-	a.urlInput.SetBorder(true).SetTitle("URL")
-
-	topFlex.AddItem(a.methodDrop, 20, 0, false)
-	topFlex.AddItem(a.urlInput, 0, 1, false)
-
-	// Authorization Panel
-	a.authType = tview.NewDropDown().
-		SetLabel("Auth: ").
-		SetOptions([]string{"No Auth", "Bearer Token", "Basic Auth", "API Key"}, nil).
-		SetCurrentOption(0)
-
-	a.authToken = tview.NewInputField().
-		SetLabel("Token: ").
-		SetFieldBackgroundColor(tcell.ColorBlack)
-
-	a.authUser = tview.NewInputField().
-		SetLabel("Username: ").
-		SetFieldBackgroundColor(tcell.ColorBlack)
-
-	a.authPass = tview.NewInputField().
-		SetLabel("Password: ").
-		SetMaskCharacter('*').
-		SetFieldBackgroundColor(tcell.ColorBlack)
-
-	a.authPanel = tview.NewFlex()
-	a.authPanel.SetBorder(true).SetTitle("Authorization")
-	a.authPanel.AddItem(a.authType, 30, 0, false)
-
-	// Update auth panel on type change
-	a.authType.SetSelectedFunc(func(text string, index int) {
-		a.updateAuthPanel(index)
-	})
-
-	a.updateAuthPanel(0) // Initialize with No Auth
-
-	// Headers
-	a.headersText = tview.NewTextArea().
-		SetPlaceholder("Headers (JSON format):\n{\n  \"Content-Type\": \"application/json\"\n}")
-	a.headersText.SetBorder(true).SetTitle("Headers")
-	a.headersText.SetBackgroundColor(tcell.ColorBlack)
-
-	// Body
-	a.bodyText = tview.NewTextArea().
-		SetPlaceholder("Request Body (for POST, PUT, PATCH)")
-	a.bodyText.SetBackgroundColor(tcell.ColorBlack)
-	httpBodyLayout := tview.NewFlex().SetDirection(tview.FlexRow)
-	httpBeautifyBtn := tview.NewButton("Beautify").SetSelectedFunc(func() {
-		a.beautifyJSON(a.bodyText)
-	})
-	httpClearBtn := tview.NewButton("Clear").SetSelectedFunc(func() {
-		a.bodyText.SetText("", true)
-	})
-	httpBodyButtons := tview.NewFlex().AddItem(tview.NewBox(), 0, 1, false).AddItem(httpBeautifyBtn, 10, 0, false).AddItem(httpClearBtn, 7, 0, false)
-	httpBodyLayout.AddItem(httpBodyButtons, 1, 0, false).AddItem(a.bodyText, 0, 1, false)
-	httpBodyLayout.SetBorder(true).SetTitle(" Body ")
-
-	leftPanel.AddItem(topFlex, 3, 0, false)
-	leftPanel.AddItem(a.authPanel, 3, 0, false)
-	leftPanel.AddItem(a.headersText, 0, 1, false)
-	leftPanel.AddItem(httpBodyLayout, 0, 1, false)
-
-	// Right panel - Response and History
-	a.httpRightPanel = tview.NewFlex().SetDirection(tview.FlexRow)
-
-	// Status
-	a.statusText = tview.NewTextView().
-		SetDynamicColors(true).
-		SetText("[yellow]Ready to send request")
-	a.statusText.SetBorder(true).SetTitle("Status")
-
-	// Response
-	a.responseText = tview.NewTextView().
-		SetDynamicColors(true).
-		SetScrollable(true).
-		SetWordWrap(true)
-	a.responseText.SetBorder(true).SetTitle("Response")
-
-	// History
-
-	// Collections
+	// The collectionsTree displays saved requests in a hierarchical view.
+	// collectionsTree menampilkan request yang disimpan dalam view hierarkis.
 	a.collectionsTree = tview.NewTreeView()
 	a.collectionsTree.SetBorder(true).SetTitle("Collections")
-	a.populateCollectionsTree() // Tampilkan semua koleksi saat startup
+	a.populateCollectionsTree()
 	a.collectionsTree.SetSelectedFunc(func(node *tview.TreeNode) {
 		reference := node.GetReference()
 		if reference == nil {
@@ -320,14 +156,11 @@ func (a *App) Init() {
 		}
 
 		if collectionNode.IsFolder {
-			// Expand atau collapse folder
 			node.SetExpanded(!node.IsExpanded())
 			collectionNode.Expanded = node.IsExpanded()
 		} else {
-			// Muat permintaan
 			req := collectionNode.Request
 			if req != nil {
-				// Default ke http jika tipe tidak ada (untuk kompatibilitas mundur)
 				if req.Type == "grpc" {
 					log.Println("Loading gRPC request from collection:", req.Name)
 					a.loadGrpcRequest(*req)
@@ -340,7 +173,6 @@ func (a *App) Init() {
 		}
 	})
 	a.collectionsTree.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		// 'n' for "new folder"
 		if event.Key() == tcell.KeyRune && event.Rune() == 'n' {
 			a.showCreateFolderModal()
 			return nil
@@ -352,32 +184,23 @@ func (a *App) Init() {
 		return event
 	})
 
-	a.httpRightPanel.AddItem(a.statusText, 3, 0, false).AddItem(a.responseText, 0, 1, false)
-	mainFlex.AddItem(leftPanel, 0, 1, true).AddItem(a.httpRightPanel, 0, 1, false)
-
-	// Inisialisasi input server gRPC di sini agar bisa diakses oleh halaman dan header
+	// Initialize the gRPC server input here so it can be accessed by the page and header. / Inisialisasi input server gRPC di sini agar dapat diakses oleh page dan header.
 	a.grpcServerInput = tview.NewInputField().SetLabel("Server: ").SetText("localhost:8081").SetFieldBackgroundColor(tcell.ColorBlack)
 
-	// Buat halaman gRPC
 	a.createGrpcPage()
 
-	// Tambahkan header/switcher di atas
 	a.headerBar = a.createHeaderBar()
 
-	// History - Inisialisasi di sini agar bisa diakses oleh explorer
+	// The historyList displays recently sent requests. / historyList menampilkan request yang baru saja dikirim.
 	a.historyList = tview.NewList().ShowSecondaryText(false)
 	a.historyList.SetBorder(true).SetTitle("History")
-	a.historyList.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
-		// Logika pemuatan akan ditangani oleh updateHistoryView
-		// Untuk saat ini, kita hanya perlu tahu item mana yang dipilih.
-		// Kita bisa menambahkan logika untuk memuat request yang benar di sini nanti.
-	})
+	a.historyList.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {})
 
-	// Buat panel explorer di sebelah kiri
+	// The explorerPanel holds the collections and history views. / explorerPanel menampung view Collections dan History.
 	a.explorerPanel = tview.NewFlex().SetDirection(tview.FlexRow)
 	a.explorerPanel.AddItem(a.collectionsTree, 0, 1, false).AddItem(a.historyList, 0, 1, false)
 
-	// Layout paling atas yang menggabungkan explorer dan konten utama
+	// The top-level layout combines the explorer and the main content area. / Layout tingkat atas menggabungkan explorer dan area content utama.
 	initialExplorerSize := 0
 	initialExplorerProportion := 0
 	if a.explorerPanelVisible {
@@ -388,8 +211,9 @@ func (a *App) Init() {
 	a.contentLayout = tview.NewFlex().
 		AddItem(a.explorerPanel, initialExplorerSize, initialExplorerProportion, false).
 		AddItem(a.rootPages, 0, 1, true)
+
 	a.appLayout = tview.NewFlex().SetDirection(tview.FlexRow).AddItem(a.headerBar, 1, 0, false).AddItem(a.contentLayout, 0, 1, true)
-	// Help modal
+
 	helpText := tview.NewTextView().
 		SetDynamicColors(true).
 		SetText(`[yellow]Keyboard Shortcuts:[-]
@@ -431,11 +255,11 @@ Press Esc to close this help.`)
 
 	a.rootPages.AddPage("help", a.createModal(helpText, 60, 20), true, false)
 
-	// Key bindings
+	// Set global key bindings for the application.
+	// Mengatur key bindings global untuk aplikasi.
 	a.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyF5:
-			// Kirim request berdasarkan mode aktif
 			currentPage, _ := a.rootPages.GetFrontPage()
 			if currentPage == "http" {
 				a.sendRequest()
@@ -475,22 +299,24 @@ Press Esc to close this help.`)
 	a.app.SetFocus(a.urlInput)
 }
 
+// createHeaderBar creates the top bar with dynamic buttons based on the current view.
+// createHeaderBar membuat bar atas dengan tombol dinamis berdasarkan view saat ini.
 func (a *App) createHeaderBar() *tview.Flex {
 	header := tview.NewFlex()
 
 	switchModeBtn := tview.NewButton("Switch (F12)").SetSelectedFunc(a.switchMode)
 
-	// Definisikan semua tombol
 	httpSendBtn := tview.NewButton("Send (F5)").SetSelectedFunc(a.sendRequest)
 	clearBtn := tview.NewButton("Clear (F6)").SetSelectedFunc(a.clearForm)
 	saveBtn := tview.NewButton("Save (F8)").SetSelectedFunc(a.showSaveRequestModal)
 	grpcSendBtn := tview.NewButton("Send (F5)").SetSelectedFunc(a.sendGrpcRequest)
 	explorerBtn := tview.NewButton("Explorer (Ctrl+E)").SetSelectedFunc(a.toggleExplorerPanel)
 
-	// Atur ulang header saat mode berubah
+	// The header is rebuilt whenever the page changes.
+	// Header di-render ulang setiap kali page berubah.
 	a.rootPages.SetChangedFunc(func() {
 		page, _ := a.rootPages.GetFrontPage()
-		header.Clear() // Hapus semua item lama
+		header.Clear()
 
 		if page == "http" {
 			header.AddItem(httpSendBtn, 0, 1, false).
@@ -499,7 +325,6 @@ func (a *App) createHeaderBar() *tview.Flex {
 				AddItem(explorerBtn, 0, 1, false).
 				AddItem(switchModeBtn, 0, 1, false)
 		} else {
-			// Tombol Connect dan input server sekarang ada di dalam halaman gRPC
 			header.AddItem(grpcSendBtn, 0, 1, false).
 				AddItem(saveBtn, 0, 1, false).
 				AddItem(explorerBtn, 0, 1, false).
@@ -507,7 +332,8 @@ func (a *App) createHeaderBar() *tview.Flex {
 		}
 	})
 
-	// Atur state awal untuk mode HTTP
+	// Set the initial state for the HTTP mode.
+	// Mengatur state awal untuk mode HTTP.
 	header.AddItem(httpSendBtn, 0, 1, false).
 		AddItem(clearBtn, 0, 1, false).
 		AddItem(saveBtn, 0, 1, false).
@@ -517,141 +343,22 @@ func (a *App) createHeaderBar() *tview.Flex {
 	return header
 }
 
+// switchMode toggles the main view between HTTP and gRPC modes.
+// switchMode mengganti view utama antara mode HTTP dan gRPC.
 func (a *App) switchMode() {
 	currentPage, _ := a.rootPages.GetFrontPage()
 	if currentPage == "http" {
 		a.rootPages.SwitchToPage("grpc")
-		a.currentPage = "grpc"
 		a.app.SetFocus(a.grpcServerInput)
 	} else {
 		a.rootPages.SwitchToPage("http")
-		a.currentPage = "http"
 		a.app.SetFocus(a.urlInput)
 	}
 }
 
-func (a *App) createGrpcPage() {
-	// Layout utama gRPC
-	grpcFlex := tview.NewFlex()
-
-	// --- Live Search Method Selector ---
-	a.grpcMethodInput = tview.NewInputField().SetLabel("Method: ").SetFieldBackgroundColor(tcell.ColorBlack)
-	clearMethodButton := tview.NewButton("X").SetSelectedFunc(func() {
-		a.grpcMethodInput.SetText("") // This will trigger the ChangedFunc
-		a.app.SetFocus(a.grpcMethodInput)
-	})
-	methodInputRow := tview.NewFlex().AddItem(a.grpcMethodInput, 0, 1, true).AddItem(clearMethodButton, 3, 0, false)
-
-	a.grpcMethodList = tview.NewList().ShowSecondaryText(false)
-	a.grpcMethodSelector = tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(methodInputRow, 1, 1, true).
-		AddItem(a.grpcMethodList, 0, 1, false) // List disembunyikan awalnya
-	a.grpcMethodSelector.SetBorder(true).SetTitle("Service Method")
-
-	// Logika Live Search
-	a.grpcMethodInput.SetChangedFunc(func(text string) {
-		a.updateGrpcMethodList(text)
-	})
-
-	// Done func untuk seleksi cepat dengan Enter
-	a.grpcMethodInput.SetDoneFunc(func(key tcell.Key) {
-		if key == tcell.KeyEnter {
-			// Hanya pilih jika ada hasil yang valid (bukan "No results found")
-			if len(a.grpcAvailableMethods) > 0 {
-				// Ambil item pertama dari daftar hasil yang difilter
-				selectedMethod := a.grpcAvailableMethods[0]
-				a.selectGrpcMethod(selectedMethod)
-			}
-		} else if key == tcell.KeyEsc {
-			a.hideMethodList()
-			a.app.SetFocus(a.grpcRequestBody)
-		}
-	})
-	// Navigasi dari Input ke List
-	a.grpcMethodInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyDown && a.grpcMethodList.GetItemCount() > 0 {
-			a.app.SetFocus(a.grpcMethodList)
-			return nil
-		}
-		if event.Key() == tcell.KeyEsc {
-			// Jika daftar hasil sedang ditampilkan, sembunyikan.
-			a.hideMethodList()
-			return nil
-		}
-		return event
-	})
-
-	// Logika saat item di list dipilih
-	a.grpcMethodList.SetSelectedFunc(func(index int, mainText, secondaryText string, shortcut rune) {
-		// Jangan lakukan apa-apa jika item "No results found" yang dipilih
-		if mainText == "[gray]No results found" {
-			return
-		}
-		a.selectGrpcMethod(mainText)
-	})
-
-	// Navigasi dari List kembali ke Input atau tutup
-	a.grpcMethodList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEsc {
-			a.hideMethodList()
-			a.app.SetFocus(a.grpcMethodInput)
-			return nil
-		}
-		if event.Key() == tcell.KeyUp && a.grpcMethodList.GetCurrentItem() == 0 {
-			a.app.SetFocus(a.grpcMethodInput)
-			return nil
-		}
-		return event
-	})
-
-	// Konten utama di sebelah kanan service tree
-	mainContent := tview.NewFlex().SetDirection(tview.FlexRow)
-
-	// Baris atas: Input Server dan Status
-	topRow := tview.NewFlex()
-	serverInputFlex := tview.NewFlex().
-		AddItem(a.grpcServerInput, 0, 1, true).
-		AddItem(tview.NewButton("Connect").SetSelectedFunc(func() { a.grpcConnect(nil) }), 12, 0, false)
-	serverInputFlex.SetBorder(true).SetTitle("Server")
-
-	a.grpcStatusText = tview.NewTextView().SetDynamicColors(true).SetText("[yellow]Not connected")
-	a.grpcStatusText.SetBorder(true).SetTitle("Status")
-	topRow.AddItem(serverInputFlex, 40, 0, true).AddItem(a.grpcMethodSelector, 0, 1, false)
-
-	// Baris bawah: Request dan Response
-	bottomRow := tview.NewFlex()
-	middlePanel := tview.NewFlex().SetDirection(tview.FlexRow)
-	a.grpcRequestMeta = tview.NewTextArea().SetPlaceholder("Metadata (JSON format)...")
-	a.grpcRequestMeta.SetBorder(true).SetTitle(" Metadata ")
-	a.grpcRequestBody = tview.NewTextArea().SetPlaceholder("Select a service method to see the request body template...")
-
-	// Buat layout untuk body dengan tombol generate template
-	bodyLayout := tview.NewFlex().SetDirection(tview.FlexRow)
-	grpcGenerateBtn := tview.NewButton("Generate").SetSelectedFunc(func() {
-		a.generateGrpcBodyTemplate(a.grpcCurrentService, a.grpcRequestBody.GetText())
-	})
-	grpcBeautifyBtn := tview.NewButton("Beautify").SetSelectedFunc(func() {
-		a.beautifyJSON(a.grpcRequestBody)
-	})
-	grpcClearBtn := tview.NewButton("Clear").SetSelectedFunc(func() {
-		a.grpcRequestBody.SetText("", true)
-	})
-	grpcBodyButtons := tview.NewFlex().AddItem(tview.NewBox(), 0, 1, false).AddItem(grpcGenerateBtn, 10, 0, false).AddItem(grpcBeautifyBtn, 10, 0, false).AddItem(grpcClearBtn, 7, 0, false)
-	bodyLayout.AddItem(grpcBodyButtons, 1, 0, false).AddItem(a.grpcRequestBody, 0, 1, false)
-	bodyLayout.SetBorder(true).SetTitle(" Request Body ")
-	middlePanel.AddItem(a.grpcRequestMeta, 0, 1, false).AddItem(bodyLayout, 0, 2, false)
-
-	a.grpcResponseView = tview.NewTextView().SetDynamicColors(true).SetScrollable(true).SetWordWrap(true)
-	a.grpcResponseView.SetBorder(true).SetTitle("Response")
-	bottomRow.AddItem(middlePanel, 0, 1, false).AddItem(a.grpcResponseView, 0, 1, false)
-
-	mainContent.AddItem(topRow, 3, 0, true).AddItem(a.grpcStatusText, 3, 0, false).AddItem(bottomRow, 0, 1, false)
-	grpcFlex.AddItem(mainContent, 0, 1, false)
-	a.rootPages.AddPage("grpc", grpcFlex, true, false)
-}
-
-// fuzzyFind melakukan pencarian sederhana yang tidak peka huruf besar-kecil
-// dan memeriksa apakah semua karakter dalam query muncul dalam target secara berurutan.
+// fuzzyFind performs a simple, case-insensitive search to check if all characters
+// in the query appear in the target string in the correct order. /
+// fuzzyFind melakukan pencarian sederhana (case-insensitive) untuk memeriksa apakah semua karakter dalam query muncul dalam target secara berurutan.
 func fuzzyFind(query, target string) bool {
 	query = strings.ToLower(query)
 	target = strings.ToLower(target)
@@ -666,19 +373,19 @@ func fuzzyFind(query, target string) bool {
 	return queryIndex == len(query)
 }
 
+// updateGrpcMethodList filters the gRPC method list based on the user's query.
+// updateGrpcMethodList memfilter daftar method gRPC berdasarkan query pengguna.
 func (a *App) updateGrpcMethodList(query string) {
 	a.grpcMethodList.Clear()
 
-	// Jika query kosong, sembunyikan daftar dan keluar.
 	if query == "" {
-		a.grpcAvailableMethods = nil // Kosongkan hasil pencarian
+		a.grpcAvailableMethods = nil
 		a.hideMethodList()
 		return
 	}
 
 	var matchedMethods []string
 	if query != "" {
-		// Selalu cari dari daftar lengkap
 		for _, method := range a.grpcAllMethods {
 			if fuzzyFind(query, method) {
 				matchedMethods = append(matchedMethods, method)
@@ -686,55 +393,31 @@ func (a *App) updateGrpcMethodList(query string) {
 		}
 	}
 
-	// Simpan hasil yang cocok untuk referensi nanti
 	a.grpcAvailableMethods = matchedMethods
 
 	if len(matchedMethods) > 0 {
 		for _, method := range matchedMethods {
 			a.grpcMethodList.AddItem(method, "", 0, nil)
 		}
-		// Tampilkan list dengan tinggi maksimal 8 baris
 		listHeight := a.grpcMethodList.GetItemCount()
 		if listHeight > 8 {
 			listHeight = 8
 		}
 		a.grpcMethodSelector.ResizeItem(a.grpcMethodList, listHeight, 1)
 	} else {
-		// Tampilkan pesan "No results" jika tidak ada yang cocok.
-		// Ini hanya akan terjadi jika query tidak kosong dan tidak ada hasil.
 		a.grpcMethodList.AddItem("[gray]No results found", "", 0, nil)
 		a.grpcMethodSelector.ResizeItem(a.grpcMethodList, 1, 1)
 	}
 }
 
-func (a *App) hideMethodList() {
-	a.grpcMethodSelector.ResizeItem(a.grpcMethodList, 0, 0)
-}
-
-func (a *App) selectGrpcMethod(methodName string) {
-	if a.grpcCurrentService != "" && a.grpcCurrentService != methodName {
-		a.grpcBodyCache[a.grpcCurrentService] = a.grpcRequestBody.GetText()
-	}
-	a.grpcCurrentService = methodName
-	a.grpcMethodInput.SetText(methodName)
-	a.grpcStatusText.SetText(fmt.Sprintf("Selected: [green]%s", methodName))
-
-	// Selalu bersihkan form dan generate template baru saat metode diganti
-	a.grpcResponseView.SetText("")
-	a.grpcRequestMeta.SetText("", true)
-	a.grpcRequestBody.SetText("", true)        // Kosongkan dulu
-	a.generateGrpcBodyTemplate(methodName, "") // Langsung generate template baru
-
-	a.hideMethodList()
-	a.app.SetFocus(a.grpcRequestBody)
-}
-
+// generateGrpcBodyTemplate uses reflection to create a JSON template for a gRPC method's request body.
+// It runs in a goroutine to avoid blocking the UI. /
+// generateGrpcBodyTemplate menggunakan reflection untuk membuat template JSON untuk body request dari sebuah method gRPC. Ini berjalan di goroutine agar tidak memblokir UI.
 func (a *App) generateGrpcBodyTemplate(fullMethodName, existingBody string) {
 	if a.grpcReflectClient == nil || fullMethodName == "" {
 		return
 	}
 
-	// Jalankan di goroutine agar tidak memblokir UI
 	go func() {
 		parts := strings.SplitN(fullMethodName, "/", 2)
 		if len(parts) != 2 {
@@ -742,40 +425,33 @@ func (a *App) generateGrpcBodyTemplate(fullMethodName, existingBody string) {
 		}
 		serviceName, methodName := parts[0], parts[1]
 
-		// ResolveService adalah panggilan jaringan, harus di luar thread utama
 		sd, err := a.grpcReflectClient.ResolveService(serviceName)
 		if err != nil {
-			return // Service tidak ditemukan
+			return
 		}
 
 		md := sd.FindMethodByName(methodName)
 		if md == nil {
-			return // Method tidak ditemukan
+			return
 		}
 
-		// Buat template JSON dari deskriptor pesan
 		reqType := md.GetInputType()
 
-		// Gunakan .Unwrap() untuk mendapatkan deskriptor API baru yang kompatibel.
 		newReqType := reqType.Unwrap().(protoreflect.MessageDescriptor)
 
-		// Gunakan body dari cache (atau string kosong jika belum ada)
 		var existingData map[string]interface{}
 		if err := json.Unmarshal([]byte(existingBody), &existingData); err != nil {
-			existingData = make(map[string]interface{}) // Jika parse gagal, mulai dengan map kosong
+			existingData = make(map[string]interface{})
 		}
 
 		mergedMap := buildTemplateMap(newReqType, existingData)
 		jsonTemplate, err := json.MarshalIndent(mergedMap, "", "  ")
 		if err != nil {
-			// Tidak perlu update UI untuk error ini, cukup log
 			log.Printf("ERROR: could not marshal template: %v", err)
 			return
 		}
 
-		// Kirim pembaruan UI kembali ke thread utama
 		a.app.QueueUpdateDraw(func() {
-			// Jika template kosong (misalnya untuk Empty message), tampilkan {}
 			if string(jsonTemplate) == "null" {
 				jsonTemplate = []byte("{}")
 			}
@@ -784,7 +460,9 @@ func (a *App) generateGrpcBodyTemplate(fullMethodName, existingBody string) {
 	}()
 }
 
-// buildTemplateMap secara rekursif membuat map[string]interface{} dari deskriptor pesan Protobuf.
+// buildTemplateMap recursively builds a map[string]interface{} from a Protobuf message descriptor,
+// preserving existing values from the `existingData` map. /
+// buildTemplateMap secara rekursif membangun sebuah map[string]interface{} dari message descriptor Protobuf, dengan mempertahankan value yang ada dari `existingData` map.
 func buildTemplateMap(md protoreflect.MessageDescriptor, existingData map[string]interface{}) map[string]interface{} {
 	template := make(map[string]interface{})
 	fields := md.Fields()
@@ -793,8 +471,6 @@ func buildTemplateMap(md protoreflect.MessageDescriptor, existingData map[string
 		fieldName := string(field.JSONName())
 
 		if existingValue, ok := existingData[fieldName]; ok {
-			// Nilai sudah ada, pertahankan.
-			// Jika ini adalah sub-pesan, kita lakukan rekursi untuk menggabungkan nilai di dalamnya.
 			if field.Kind() == protoreflect.MessageKind && !field.IsList() && !field.IsMap() {
 				if subMap, isMap := existingValue.(map[string]interface{}); isMap {
 					template[fieldName] = buildTemplateMap(field.Message(), subMap)
@@ -805,13 +481,11 @@ func buildTemplateMap(md protoreflect.MessageDescriptor, existingData map[string
 				template[fieldName] = existingValue
 			}
 		} else {
-			// Nilai belum ada, buat template default (nilai nol).
 			if field.IsList() {
 				template[fieldName] = []interface{}{}
 			} else if field.IsMap() {
 				template[fieldName] = make(map[string]interface{})
 			} else if field.Kind() == protoreflect.MessageKind {
-				// Untuk sub-pesan, panggil rekursif dengan data kosong.
 				template[fieldName] = buildTemplateMap(field.Message(), make(map[string]interface{}))
 			} else {
 				template[fieldName] = getZeroValue(field)
@@ -821,7 +495,8 @@ func buildTemplateMap(md protoreflect.MessageDescriptor, existingData map[string
 	return template
 }
 
-// getZeroValue mengembalikan nilai nol yang sesuai untuk tipe field Protobuf.
+// getZeroValue returns the appropriate zero value for a Protobuf field type.
+// getZeroValue mengembalikan zero value yang sesuai untuk tipe field Protobuf.
 func getZeroValue(fd protoreflect.FieldDescriptor) interface{} {
 	switch fd.Kind() {
 	case protoreflect.StringKind:
@@ -833,6 +508,9 @@ func getZeroValue(fd protoreflect.FieldDescriptor) interface{} {
 	}
 }
 
+// grpcConnect establishes a connection to a gRPC server and uses reflection
+// to discover available services and methods. It runs asynchronously. /
+// grpcConnect membuat koneksi ke server gRPC dan menggunakan reflection untuk menemukan service dan method yang tersedia. Ini berjalan secara asinkron.
 func (a *App) grpcConnect(onSuccess func()) {
 	serverAddr := a.grpcServerInput.GetText()
 	if serverAddr == "" {
@@ -840,11 +518,9 @@ func (a *App) grpcConnect(onSuccess func()) {
 		return
 	}
 
-	// Update status di UI dan jalankan koneksi di goroutine agar tidak membeku
 	a.grpcStatusText.SetText(fmt.Sprintf("[yellow]Connecting to %s...", serverAddr))
 
 	go func() {
-		// Bersihkan koneksi lama jika ada
 		if a.grpcConn != nil {
 			a.grpcConn.Close()
 		}
@@ -864,7 +540,6 @@ func (a *App) grpcConnect(onSuccess func()) {
 		a.grpcConn = conn
 		a.grpcStub = grpcdynamic.NewStub(conn)
 
-		// Gunakan refleksi
 		reflectionClient := grpc_reflection_v1alpha.NewServerReflectionClient(a.grpcConn)
 		a.grpcReflectClient = grpcreflect.NewClient(ctx, reflectionClient)
 		services, err := a.grpcReflectClient.ListServices()
@@ -876,7 +551,6 @@ func (a *App) grpcConnect(onSuccess func()) {
 			return
 		}
 
-		// Kirim pembaruan UI kembali ke thread utama
 		a.app.QueueUpdateDraw(func() {
 			var serviceMethods []string
 			for _, srv := range services {
@@ -893,14 +567,12 @@ func (a *App) grpcConnect(onSuccess func()) {
 				}
 			}
 
-			a.grpcAllMethods = serviceMethods       // Simpan daftar lengkap
-			a.grpcAvailableMethods = serviceMethods // Awalnya, semua tersedia
-			// Reset tombol dan status
+			a.grpcAllMethods = serviceMethods
+			a.grpcAvailableMethods = serviceMethods
 			a.grpcMethodInput.SetText("")
 			a.grpcMethodInput.SetPlaceholder("Type to search for a method...")
 			a.grpcStatusText.SetText(fmt.Sprintf("[green]Connected to %s. Found %d services.", serverAddr, len(services)-1))
 
-			// Jalankan callback jika koneksi dan discovery berhasil
 			if onSuccess != nil {
 				onSuccess()
 			}
@@ -908,6 +580,8 @@ func (a *App) grpcConnect(onSuccess func()) {
 	}()
 }
 
+// sendGrpcRequest sends a gRPC request using the dynamic stub.
+// sendGrpcRequest mengirimkan request gRPC menggunakan dynamic stub.
 func (a *App) sendGrpcRequest() {
 	if a.grpcConn == nil {
 		a.grpcStatusText.SetText("[red]Not connected to any server.")
@@ -922,7 +596,6 @@ func (a *App) sendGrpcRequest() {
 	a.grpcResponseView.SetText("")
 
 	go func() {
-		// 1. Parse service and method name
 		parts := strings.SplitN(a.grpcCurrentService, "/", 2)
 		if len(parts) != 2 {
 			log.Printf("ERROR: Invalid gRPC service/method format: %s", a.grpcCurrentService)
@@ -933,7 +606,6 @@ func (a *App) sendGrpcRequest() {
 		}
 		serviceName, methodName := parts[0], parts[1]
 
-		// 2. Resolve service and then find method descriptor
 		sd, err := a.grpcReflectClient.ResolveService(serviceName)
 		if err != nil {
 			log.Printf("ERROR: Failed to resolve gRPC service '%s': %v", serviceName, err)
@@ -951,7 +623,6 @@ func (a *App) sendGrpcRequest() {
 			return
 		}
 
-		// 3. Create dynamic message from JSON body
 		req := md.GetInputType()
 		dynMsg := dynamic.NewMessage(req)
 		bodyText := a.grpcRequestBody.GetText()
@@ -965,7 +636,6 @@ func (a *App) sendGrpcRequest() {
 			}
 		}
 
-		// 4. Prepare context with metadata
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
@@ -982,7 +652,6 @@ func (a *App) sendGrpcRequest() {
 			ctx = metadata.NewOutgoingContext(ctx, metadata.New(metaMap))
 		}
 
-		// 5. Invoke RPC
 		log.Printf("INFO: Invoking gRPC method: %s", a.grpcCurrentService)
 		start := time.Now()
 		resp, err := a.grpcStub.InvokeRpc(ctx, md, dynMsg)
@@ -996,7 +665,6 @@ func (a *App) sendGrpcRequest() {
 				return
 			}
 
-			// 6. Format and display response
 			dynResp, ok := resp.(*dynamic.Message)
 			if !ok {
 				log.Printf("ERROR: Unexpected gRPC response type: %T", resp)
@@ -1017,7 +685,6 @@ func (a *App) sendGrpcRequest() {
 		})
 	}()
 
-	// Add to history
 	historyReq := Request{
 		Name:         a.grpcCurrentService,
 		Type:         "grpc",
@@ -1028,9 +695,11 @@ func (a *App) sendGrpcRequest() {
 		Time:         time.Now(),
 	}
 	a.history = append([]Request{historyReq}, a.history...)
-	// Update history view to reflect the new item in the current mode
 	a.updateHistoryView()
 }
+
+// loadRequestFromHistory loads a selected request from the history list into the UI.
+// loadRequestFromHistory memuat request yang dipilih dari daftar History ke dalam UI.
 func (a *App) loadRequestFromHistory(index int) {
 	if index < len(a.history) {
 		req := a.history[index]
@@ -1042,11 +711,12 @@ func (a *App) loadRequestFromHistory(index int) {
 	}
 }
 
+// showSaveRequestModal displays a modal form to save the current request to a collection.
+// showSaveRequestModal menampilkan form modal untuk menyimpan request saat ini ke Collection.
 func (a *App) showSaveRequestModal() {
 	var defaultName string
-	// currentPage, _ := a.rootPages.GetFrontPage()
-	log.Printf("a.currentPage show modal: %v\n", a.currentPage)
-	if a.currentPage == "grpc" {
+	requestPage, _ := a.rootPages.GetFrontPage()
+	if requestPage == "grpc" {
 		if a.grpcCurrentService != "" {
 			defaultName = a.grpcCurrentService
 		} else {
@@ -1063,7 +733,7 @@ func (a *App) showSaveRequestModal() {
 		AddFormItem(nameInput).
 		AddButton("Save", func() {
 			name := nameInput.GetText()
-			a.saveCurrentRequest(name)
+			a.saveCurrentRequest(name, requestPage)
 			a.rootPages.RemovePage("saveModal")
 		}).
 		AddButton("Cancel", func() {
@@ -1076,6 +746,8 @@ func (a *App) showSaveRequestModal() {
 	a.rootPages.AddPage("saveModal", modal, true, true)
 }
 
+// showCreateFolderModal displays a modal form to create a new folder in the collections.
+// showCreateFolderModal menampilkan form modal untuk membuat folder baru di Collections.
 func (a *App) showCreateFolderModal() {
 	nameInput := tview.NewInputField().SetLabel("Folder Name").SetFieldWidth(50)
 
@@ -1098,10 +770,12 @@ func (a *App) showCreateFolderModal() {
 	a.rootPages.AddPage("createFolderModal", modal, true, true)
 }
 
+// showDeleteConfirmationModal displays a confirmation dialog before deleting a collection item.
+// showDeleteConfirmationModal menampilkan dialog konfirmasi sebelum menghapus item dari Collection.
 func (a *App) showDeleteConfirmationModal() {
 	selectedNode := a.collectionsTree.GetCurrentNode()
 	if selectedNode == nil || selectedNode == a.collectionsTree.GetRoot() {
-		return // Tidak bisa menghapus root
+		return
 	}
 
 	ref := selectedNode.GetReference()
@@ -1123,6 +797,8 @@ func (a *App) showDeleteConfirmationModal() {
 	a.rootPages.AddPage("deleteConfirmModal", modal, true, true)
 }
 
+// deleteCollectionItem removes the specified node from the collections data structure and refreshes the tree.
+// deleteCollectionItem menghapus node yang ditentukan dari struktur data Collections dan me-refresh tree view.
 func (a *App) deleteCollectionItem(nodeToDelete *CollectionNode) {
 	parentData := a.findParentNode(a.collectionsRoot, nodeToDelete)
 	if parentData == nil {
@@ -1134,23 +810,22 @@ func (a *App) deleteCollectionItem(nodeToDelete *CollectionNode) {
 	a.saveCollections()
 }
 
+// createCollectionFolder adds a new folder to the collections.
+// createCollectionFolder menambahkan folder baru ke Collections.
 func (a *App) createCollectionFolder(name string) {
 	selectedTreeNode := a.collectionsTree.GetCurrentNode()
 	if selectedTreeNode == nil {
 		return
 	}
 
-	// Find the parent CollectionNode where the new folder will be added
 	var parentData *CollectionNode
 	ref := selectedTreeNode.GetReference()
 	if ref != nil {
 		selectedData, ok := ref.(*CollectionNode)
 		if ok {
 			if selectedData.IsFolder {
-				// If a folder is selected, the new folder is a child of it
 				parentData = selectedData
 			} else {
-				// If a request is selected, find its parent in the data structure
 				parentData = a.findParentNode(a.collectionsRoot, selectedData)
 			}
 		}
@@ -1166,11 +841,11 @@ func (a *App) createCollectionFolder(name string) {
 	a.saveCollections()
 }
 
-func (a *App) saveCurrentRequest(name string) {
+// saveCurrentRequest gathers data from the UI and saves it as a new collection item.
+// saveCurrentRequest mengumpulkan data dari UI dan menyimpannya sebagai item Collection baru.
+func (a *App) saveCurrentRequest(name string, requestType string) {
 	var requestData *Request
-	// currentPage, _ := a.rootPages.GetFrontPage()
-	log.Printf("currentPage: %v\n", a.currentPage)
-	if a.currentPage == "grpc" {
+	if requestType == "grpc" {
 		requestData = &Request{
 			Name:         name,
 			Type:         "grpc",
@@ -1180,7 +855,7 @@ func (a *App) saveCurrentRequest(name string) {
 			Body:         a.grpcRequestBody.GetText(),
 			Time:         time.Now(),
 		}
-	} else { // HTTP
+	} else {
 		_, method := a.methodDrop.GetCurrentOption()
 		url := a.urlInput.GetText()
 		headersText := a.headersText.GetText()
@@ -1202,17 +877,12 @@ func (a *App) saveCurrentRequest(name string) {
 		}
 	}
 
-	// Jika tidak ada data yang bisa disimpan
-	if requestData == nil {
-		return
-	}
 	newNode := &CollectionNode{
 		Name:     name,
 		IsFolder: false,
 		Request:  requestData,
 	}
 
-	// Add to the currently selected folder or root
 	selectedTreeNode := a.collectionsTree.GetCurrentNode()
 	var parentData *CollectionNode
 	if selectedTreeNode != nil {
@@ -1230,15 +900,17 @@ func (a *App) saveCurrentRequest(name string) {
 	}
 
 	if parentData == nil {
-		parentData = a.collectionsRoot // Default to root
+		parentData = a.collectionsRoot
 	}
 
 	parentData.Children = append(parentData.Children, newNode)
 
 	a.populateCollectionsTree()
-	a.saveCollections() // Save changes
+	a.saveCollections()
 }
 
+// populateCollectionsTree rebuilds the entire collections tree view from the data model.
+// populateCollectionsTree membangun kembali seluruh tree view Collections dari data model.
 func (a *App) populateCollectionsTree() {
 	rootNode := tview.NewTreeNode(a.collectionsRoot.Name).SetReference(a.collectionsRoot)
 	a.collectionsTree.SetRoot(rootNode).SetCurrentNode(rootNode)
@@ -1246,11 +918,13 @@ func (a *App) populateCollectionsTree() {
 	rootNode.SetExpanded(a.collectionsRoot.Expanded)
 }
 
+// addTreeNodes is a recursive helper to add nodes to the collections tree view.
+// addTreeNodes adalah helper rekursif untuk menambahkan node ke tree view Collections.
 func (a *App) addTreeNodes(parent *tview.TreeNode, children []*CollectionNode) {
 	for _, childData := range children {
-		icon := "📄" // Ikon untuk request
+		icon := "📄"
 		if childData.IsFolder {
-			icon = "📁" // Ikon untuk folder
+			icon = "📁"
 		}
 		node := tview.NewTreeNode(fmt.Sprintf("%s %s", icon, childData.Name)).
 			SetReference(childData).
@@ -1264,6 +938,8 @@ func (a *App) addTreeNodes(parent *tview.TreeNode, children []*CollectionNode) {
 	}
 }
 
+// findParentNode recursively searches for the parent of a target node within the collections data structure.
+// findParentNode secara rekursif mencari parent dari sebuah target node di dalam struktur data Collections.
 func (a *App) findParentNode(root, target *CollectionNode) *CollectionNode {
 	for _, child := range root.Children {
 		if child == target {
@@ -1278,7 +954,8 @@ func (a *App) findParentNode(root, target *CollectionNode) *CollectionNode {
 	return nil
 }
 
-// removeNode adalah fungsi pembantu untuk menghapus node dari slice.
+// removeNode is a helper function to remove a node from a slice of nodes.
+// removeNode adalah helper untuk menghapus sebuah node dari slice.
 func removeNode(slice []*CollectionNode, node *CollectionNode) []*CollectionNode {
 	for i, n := range slice {
 		if n == node {
@@ -1288,6 +965,8 @@ func removeNode(slice []*CollectionNode, node *CollectionNode) []*CollectionNode
 	return slice
 }
 
+// updateAuthPanel dynamically changes the authentication input fields based on the selected auth type.
+// updateAuthPanel secara dinamis mengubah field input otentikasi berdasarkan auth type yang dipilih.
 func (a *App) updateAuthPanel(authType int) {
 	a.authPanel.Clear()
 	a.authPanel.AddItem(a.authType, 30, 0, false)
@@ -1316,6 +995,8 @@ func (a *App) updateAuthPanel(authType int) {
 	}
 }
 
+// createModal is a helper function to wrap a primitive in a centered modal layout.
+// createModal adalah helper untuk membungkus sebuah primitive dalam layout modal yang terpusat.
 func (a *App) createModal(p tview.Primitive, width, height int) tview.Primitive {
 	return tview.NewFlex().
 		AddItem(nil, 0, 1, false).
@@ -1326,152 +1007,110 @@ func (a *App) createModal(p tview.Primitive, width, height int) tview.Primitive 
 		AddItem(nil, 0, 1, false)
 }
 
+// sendRequest gathers data from the HTTP UI, calls the HTTP client, and updates the UI with the response.
+// sendRequest mengumpulkan data dari UI HTTP, memanggil HTTP client, dan memperbarui UI dengan response.
 func (a *App) sendRequest() {
 	_, method := a.methodDrop.GetCurrentOption()
-	url := a.urlInput.GetText()
+	_, authType := a.authType.GetCurrentOption()
 
-	if url == "" {
+	requestData := HttpRequestData{
+		Method:    method,
+		URL:       a.urlInput.GetText(),
+		Body:      a.bodyText.GetText(),
+		AuthType:  authType,
+		AuthToken: a.authToken.GetText(),
+		AuthUser:  a.authUser.GetText(),
+		AuthPass:  a.authPass.GetText(),
+		Headers:   make(map[string]string),
+	}
+
+	if requestData.URL == "" {
 		a.statusText.SetText("[red]Error: URL is required")
 		return
 	}
 
-	a.statusText.SetText("[yellow]Sending request...")
-
-	// Parse headers
-	headers := make(map[string]string)
 	headersJSON := a.headersText.GetText()
 	if headersJSON != "" {
-		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
+		if err := json.Unmarshal([]byte(headersJSON), &requestData.Headers); err != nil {
 			a.statusText.SetText(fmt.Sprintf("[red]Error parsing headers: %v", err))
 			return
 		}
 	}
 
-	// Create request
-	var bodyReader io.Reader
-	bodyText := a.bodyText.GetText()
-	if bodyText != "" {
-		bodyReader = bytes.NewBufferString(bodyText)
-	}
+	a.statusText.SetText("[yellow]Sending request...")
 
-	req, err := http.NewRequest(method, url, bodyReader)
-	if err != nil {
-		log.Printf("ERROR: Failed to create HTTP request for %s %s: %v", method, url, err)
-		a.statusText.SetText(fmt.Sprintf("[red]Error creating request: %v", err))
-		return
-	}
+	go func() {
+		respData := doHttpRequest(requestData)
 
-	// Add headers
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
+		a.app.QueueUpdateDraw(func() {
+			if respData.Error != nil {
+				a.statusText.SetText(fmt.Sprintf("[red]Error: %v", respData.Error))
+				a.responseText.SetText(fmt.Sprintf("[red]Error: %v", respData.Error))
+				return
+			}
 
-	// Add authorization
-	_, authType := a.authType.GetCurrentOption()
-	switch authType {
-	case "Bearer Token":
-		token := a.authToken.GetText()
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
-	case "Basic Auth":
-		username := a.authUser.GetText()
-		password := a.authPass.GetText()
-		if username != "" {
-			req.SetBasicAuth(username, password)
-		}
-	case "API Key":
-		// For API Key, user should add it manually in headers
-		// as the format varies (X-API-Key, api_key, etc.)
-	}
+			statusColor := "[green]"
+			if respData.StatusCode >= 400 {
+				statusColor = "[red]"
+			} else if respData.StatusCode >= 300 {
+				statusColor = "[yellow]"
+			}
 
-	// Send request
-	log.Printf("INFO: Sending HTTP request: %s %s", method, url)
-	start := time.Now()
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	duration := time.Since(start)
+			a.statusText.SetText(fmt.Sprintf("%s%s[-] | Duration: [cyan]%v[-]",
+				statusColor, respData.Status, respData.Duration))
 
-	if err != nil {
-		a.statusText.SetText(fmt.Sprintf("[red]Error: %v", err))
-		log.Printf("ERROR: HTTP request failed for %s %s: %v", method, url, err)
-		a.responseText.SetText(fmt.Sprintf("[red]Error: %v", err))
-		return
-	}
-	defer resp.Body.Close()
+			var formattedBody bytes.Buffer
+			bodyToDisplay := respData.Body
+			if err := json.Indent(&formattedBody, respData.Body, "", "  "); err == nil {
+				bodyToDisplay = formattedBody.Bytes()
+			}
 
-	// Read response
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("ERROR: Failed to read HTTP response body: %v", err)
-		a.statusText.SetText(fmt.Sprintf("[red]Error reading response: %v", err))
-		return
-	}
+			var responseBuilder strings.Builder
+			responseBuilder.WriteString(fmt.Sprintf("[yellow]Status:[-] %s%s[-]\n", statusColor, respData.Status))
+			responseBuilder.WriteString(fmt.Sprintf("[yellow]Duration:[-] [cyan]%v[-]\n", respData.Duration))
+			responseBuilder.WriteString(fmt.Sprintf("[yellow]Content-Length:[-] %d bytes\n\n", len(respData.Body)))
+			responseBuilder.WriteString("[yellow]Headers:[-]\n")
 
-	// Format response
-	statusColor := "[green]"
-	if resp.StatusCode >= 400 {
-		statusColor = "[red]"
-	} else if resp.StatusCode >= 300 {
-		statusColor = "[yellow]"
-	}
+			for k, v := range respData.Headers {
+				responseBuilder.WriteString(fmt.Sprintf("  [cyan]%s:[-] %s\n", k, strings.Join(v, ", ")))
+			}
 
-	log.Printf("INFO: HTTP request to %s %s completed with status %s. Duration: %v", method, url, resp.Status, duration)
-	a.statusText.SetText(fmt.Sprintf("%s%s[-] | Duration: [cyan]%v[-]",
-		statusColor, resp.Status, duration))
+			responseBuilder.WriteString(fmt.Sprintf("\n[yellow]Body:[-]\n%s", string(bodyToDisplay)))
 
-	// Try to format JSON
-	var formatted bytes.Buffer
-	if err := json.Indent(&formatted, body, "", "  "); err == nil {
-		body = formatted.Bytes()
-	}
+			a.responseText.SetText(responseBuilder.String()).ScrollToBeginning()
+		})
+	}()
 
-	responseText := fmt.Sprintf("[yellow]Status:[-] %s%s[-]\n", statusColor, resp.Status)
-	responseText += fmt.Sprintf("[yellow]Duration:[-] [cyan]%v[-]\n", duration)
-	responseText += fmt.Sprintf("[yellow]Content-Length:[-] %d bytes\n\n", len(body))
-	responseText += "[yellow]Headers:[-]\n"
-
-	for k, v := range resp.Header {
-		responseText += fmt.Sprintf("  [cyan]%s:[-] %s\n", k, strings.Join(v, ", "))
-	}
-
-	responseText += fmt.Sprintf("\n[yellow]Body:[-]\n%s", string(body))
-
-	a.responseText.SetText(responseText)
-	a.responseText.ScrollToBeginning()
-
-	// Add to history
 	historyReq := Request{
-		Method:  method,
-		URL:     url,
-		Headers: headers,
-		Body:    bodyText,
+		Method:  requestData.Method,
+		URL:     requestData.URL,
+		Headers: requestData.Headers,
+		Body:    requestData.Body,
 		Time:    time.Now(),
 	}
-	historyReq.Type = "http" // Ensure type is set for history
+	historyReq.Type = "http"
 	a.history = append([]Request{historyReq}, a.history...)
 
-	// Update history view to reflect the new item in the current mode
 	a.updateHistoryView()
 }
 
+// updateHistoryView clears and repopulates the history list view.
+// updateHistoryView membersihkan dan mengisi ulang list view History.
 func (a *App) updateHistoryView() {
 	a.historyList.Clear()
-	for _, req := range a.history {
+	for i, req := range a.history {
 		var title string
 		if req.Type == "grpc" {
 			title = fmt.Sprintf("[gRPC] %s (%s)", req.Name, req.Time.Format("15:04:05"))
 		} else {
 			title = fmt.Sprintf("[%s] %s (%s)", req.Method, req.URL, req.Time.Format("15:04:05"))
 		}
-		a.historyList.AddItem(title, "", 0, nil)
+		a.historyList.AddItem(title, "", 0, func() { a.loadRequestFromHistory(i) })
 	}
-	// Set ulang selected func untuk menangkap index yang benar dari list yang sudah difilter
-	a.historyList.SetSelectedFunc(func(i int, mainText string, secondaryText string, shortcut rune) {
-		a.loadRequestFromHistory(i)
-	})
 }
 
+// clearForm resets all input fields in the HTTP view to their default state.
+// clearForm me-reset semua input field di view HTTP ke state default.
 func (a *App) clearForm() {
 	a.urlInput.SetText("")
 	a.headersText.SetText("", true)
@@ -1486,8 +1125,9 @@ func (a *App) clearForm() {
 	a.updateAuthPanel(0)
 }
 
+// loadRequest populates the HTTP view with data from a Request object.
+// loadRequest mengisi view HTTP dengan data dari sebuah object Request.
 func (a *App) loadRequest(req Request) {
-	// Find method index
 	methods := []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
 	for i, m := range methods {
 		if m == req.Method {
@@ -1514,12 +1154,11 @@ func (a *App) loadRequest(req Request) {
 	a.app.SetFocus(a.urlInput)
 }
 
+// loadGrpcRequest populates the gRPC view with data from a Request object and initiates a connection.
+// loadGrpcRequest mengisi view gRPC dengan data dari sebuah object Request dan memulai koneksi.
 func (a *App) loadGrpcRequest(req Request) {
-	// Pindah ke halaman gRPC
 	a.rootPages.SwitchToPage("grpc")
 
-	// Langkah 1: Isi semua data ke UI terlebih dahulu.
-	// Ini adalah data yang benar dan tidak boleh ditimpa.
 	a.grpcServerInput.SetText(req.GrpcServer)
 	a.grpcRequestMeta.SetText(req.GrpcMetadata, false)
 	a.grpcMethodInput.SetText(req.GrpcMethod)
@@ -1527,24 +1166,21 @@ func (a *App) loadGrpcRequest(req Request) {
 	a.grpcCurrentService = req.GrpcMethod
 	a.grpcStatusText.SetText(fmt.Sprintf("Loaded: [green]%s[-]", req.Name))
 
-	// 3. Simpan body yang dimuat ke cache agar tidak hilang saat beralih
 	if req.GrpcMethod != "" {
 		a.grpcBodyCache[req.GrpcMethod] = req.Body
 	}
 
-	// 4. Definisikan callback yang akan dijalankan setelah koneksi berhasil
-	// Callback ini SEKARANG HANYA bertugas memilih node di pohon layanan.
 	onConnectSuccess := func() {
 		a.grpcCurrentService = req.GrpcMethod
-		// Cukup update teks di input field, karena data lain sudah dimuat.
 		a.grpcMethodInput.SetText(req.GrpcMethod)
 	}
 
-	// 5. Panggil grpcConnect dengan callback untuk otomatis terhubung dan memilih method
 	a.grpcConnect(onConnectSuccess)
 	a.app.SetFocus(a.grpcServerInput)
 }
 
+// beautifyJSON formats the JSON content of a given text area.
+// beautifyJSON memformat konten JSON dari sebuah text area.
 func (a *App) beautifyJSON(textArea *tview.TextArea) {
 	currentText := textArea.GetText()
 	if currentText == "" {
@@ -1554,39 +1190,42 @@ func (a *App) beautifyJSON(textArea *tview.TextArea) {
 	var prettyJSON bytes.Buffer
 	err := json.Indent(&prettyJSON, []byte(currentText), "", "  ")
 	if err != nil {
-		// Jika gagal, jangan ubah teksnya. Mungkin bisa tambahkan notifikasi error.
 		log.Printf("WARN: Failed to beautify JSON: %v", err)
 		return
 	}
 	textArea.SetText(prettyJSON.String(), false)
 }
 
+// toggleExplorerPanel shows or hides the left-side explorer panel.
+// toggleExplorerPanel menampilkan atau menyembunyikan explorer panel di sisi kiri.
 func (a *App) toggleExplorerPanel() {
 	a.explorerPanelVisible = !a.explorerPanelVisible
 	if a.explorerPanelVisible {
-		// Tampilkan panel dengan memberikan ukuran tetap 40
 		a.contentLayout.ResizeItem(a.explorerPanel, 40, 0)
 	} else {
-		// Sembunyikan panel dengan mengatur fixedSize dan proportion menjadi 0.
 		a.contentLayout.ResizeItem(a.explorerPanel, 0, 0)
 	}
 }
 
+// Run starts the application's event loop.
+// Run memulai event loop dari aplikasi.
 func (a *App) Run() error {
 	return a.app.Run()
 }
 
+// main is the entry point of the application.
+// main adalah entry point dari aplikasi.
 func main() {
 	initLogger()
 	app := NewApp()
 	app.Init()
 
-	// Simpan state ke file saat aplikasi keluar
 	defer func() {
 		app.saveCollections()
 		app.saveGrpcCache()
 		log.Println("INFO: Application shutting down.")
 	}()
+
 	if err := app.Run(); err != nil {
 		panic(err)
 	}
