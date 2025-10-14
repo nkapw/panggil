@@ -10,7 +10,7 @@
 
 ---
 
-## ✨ Features / Fitur
+## Features / Fitur
 
 - **Dual Mode**: Seamlessly switch between HTTP and gRPC modes.
 - **HTTP Client**:
@@ -28,35 +28,34 @@
 
 ---
 
-## 🚀 Installation / Instalasi
+## Installation / Instalasi
 
-You need to have Go (version 1.18 or newer) installed on your system.
+### Option 1: One-Liner Script (Recommended for macOS & Linux)
 
-1.  **Clone the repository:**
-    *(Clone repositori ini:)*
-    ```sh
-    git clone https://github.com/nkapw/panggil.git
-    cd panggil
-    ```
+You can install `panggil` with a single command using `curl`. This will automatically download the correct version for your system and install it.
 
-2.  **Build the application:**
-    *(Build aplikasi:)*
-    ```sh
-    go build
-    ```
+```sh
+curl -sSL https://raw.githubusercontent.com/nkapw/panggil/main/install.sh | bash
+```
+**Note:** You might be prompted for your password (`sudo`) to move the binary to `/usr/local/bin`.
 
-3.  **Run the application:**
-    *(Jalankan aplikasi:)*
-    ```sh
-    ./panggil
-    ```
+### Manual Download
 
-You can also move the binary to a directory in your `PATH` (e.g., `/usr/local/bin`) for easy access from anywhere.
-*(Anda juga bisa memindahkan file binary ke direktori yang ada di `PATH` Anda (misalnya, `/usr/local/bin`) agar mudah diakses dari mana saja.)*
+Alternatively, you can download a pre-compiled binary for your operating system from the GitHub Releases page and place it in a directory within your system's `PATH`.
 
+### Option 2: Building from Source
+
+If you have Go installed, you can build `panggil` from source:
+
+```sh
+git clone https://github.com/nkapw/panggil.git
+cd panggil
+go build -o panggil
+./panggil
+```
 ---
 
-## ⌨️ Usage & Keybindings / Penggunaan & Keybindings
+## Usage & Keybindings / Penggunaan & Keybindings
 
 The application is designed to be controlled primarily with the keyboard.
 
@@ -75,4 +74,3 @@ The application is designed to be controlled primarily with the keyboard.
 | `Esc`       | Close modals or popups               |
 
 ---
-
