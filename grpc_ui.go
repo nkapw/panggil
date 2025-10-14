@@ -34,12 +34,13 @@ func (a *App) createGrpcPage() {
 	// Handle 'Enter' to select the top search result, and 'Esc' to hide the list.
 	// Menangani 'Enter' untuk memilih hasil pencarian teratas, dan 'Esc' untuk menyembunyikan list.
 	a.grpcMethodInput.SetDoneFunc(func(key tcell.Key) {
-		if key == tcell.KeyEnter {
+		switch key {
+		case tcell.KeyEnter:
 			if len(a.grpcAvailableMethods) > 0 {
 				selectedMethod := a.grpcAvailableMethods[0]
 				a.selectGrpcMethod(selectedMethod)
 			}
-		} else if key == tcell.KeyEsc {
+		case tcell.KeyEsc:
 			a.hideMethodList()
 			a.app.SetFocus(a.grpcRequestBody)
 		}
