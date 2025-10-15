@@ -11,9 +11,13 @@ type Request struct {
 	Type string    `json:"type"` // "http" or "grpc"
 
 	// HTTP specific fields / Field spesifik HTTP
-	Method  string            `json:"method,omitempty"`
-	URL     string            `json:"url,omitempty"`
-	Headers map[string]string `json:"headers,omitempty"`
+	Method    string            `json:"method,omitempty"`
+	URL       string            `json:"url,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	AuthType  int               `json:"auth_type,omitempty"`
+	AuthToken string            `json:"auth_token,omitempty"`
+	AuthUser  string            `json:"auth_user,omitempty"`
+	AuthPass  string            `json:"auth_pass,omitempty"`
 
 	// gRPC specific fields / Field spesifik gRPC
 	GrpcServer   string `json:"grpc_server,omitempty"`

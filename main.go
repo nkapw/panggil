@@ -857,9 +857,13 @@ func (a *App) saveCurrentRequest(name string, requestType string) {
 		}
 	} else {
 		_, method := a.methodDrop.GetCurrentOption()
+		authTypeIndex, _ := a.authType.GetCurrentOption()
 		url := a.urlInput.GetText()
 		headersText := a.headersText.GetText()
 		body := a.bodyText.GetText()
+		authToken := a.authToken.GetText()
+		authUser := a.authUser.GetText()
+		authPass := a.authPass.GetText()
 
 		headers := make(map[string]string)
 		if headersText != "" {
@@ -867,13 +871,17 @@ func (a *App) saveCurrentRequest(name string, requestType string) {
 		}
 
 		requestData = &Request{
-			Name:    name,
-			Type:    "http",
-			Method:  method,
-			URL:     url,
-			Headers: headers,
-			Body:    body,
-			Time:    time.Now(),
+			Name:      name,
+			Type:      "http",
+			Method:    method,
+			URL:       url,
+			Headers:   headers,
+			AuthType:  authTypeIndex,
+			AuthToken: authToken,
+			AuthUser:  authUser,
+			AuthPass:  authPass,
+			Body:      body,
+			Time:      time.Now(),
 		}
 	}
 
@@ -1135,6 +1143,12 @@ func (a *App) loadRequest(req Request) {
 			break
 		}
 	}
+
+	a.authType.SetCurrentOption(req.AuthType)
+	a.updateAuthPanel(req.AuthType)
+	a.authToken.SetText(req.AuthToken)
+	a.authUser.SetText(req.AuthUser)
+	a.authPass.SetText(req.AuthPass)
 
 	a.urlInput.SetText(req.URL)
 
