@@ -12,6 +12,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+	"github.com/sahilm/fuzzy"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -78,6 +79,9 @@ type App struct {
 	collectionsTree *tview.TreeView
 
 	// UI state flags / Flag untuk state UI
+	allCollectionNodes     []*CollectionNode
+	collectionMatchedNodes []*CollectionNode
+
 	explorerPanelVisible bool
 }
 
@@ -113,7 +117,7 @@ func (a *App) loadGrpcCache() {
 // NewApp membuat dan menginisialisasi instance App baru.
 func NewApp() *App {
 	app := &App{
-		app:     tview.NewApplication().EnableMouse(true),
+		app:     tview.NewApplication().EnableMouse(true).EnablePaste(true),
 		history: make([]Request, 0),
 		collectionsRoot: &CollectionNode{
 			Name:     "Collections",
@@ -197,9 +201,7 @@ func (a *App) Init() {
 	a.historyList.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {})
 
 	// The explorerPanel holds the collections and history views. / explorerPanel menampung view Collections dan History.
-	a.explorerPanel = tview.NewFlex().SetDirection(tview.FlexRow)
-	a.explorerPanel.AddItem(a.collectionsTree, 0, 1, false).AddItem(a.historyList, 0, 1, false)
-
+	a.explorerPanel = tview.NewFlex().SetDirection(tview.FlexRow).AddItem(a.collectionsTree, 0, 1, false).AddItem(a.historyList, 0, 1, false)
 	// The top-level layout combines the explorer and the main content area. / Layout tingkat atas menggabungkan explorer dan area content utama.
 	initialExplorerSize := 0
 	initialExplorerProportion := 0
@@ -225,7 +227,9 @@ func (a *App) Init() {
 [green]F9[-]     - Focus Collections
 [green]F12[-]    - Switch HTTP/gRPC Mode 
 [green]F1[-]     - Show Help
-[green]Ctrl+C[-] - Quit Application
+[green]Ctrl+F[-] - Search Collections (Telescope)
+[green]Ctrl+C[-] - Copy text from focused field
+[green]Ctrl+Q[-] - Quit Application
 [green]Ctrl+E[-] - Toggle Collections/History Panel
 [green]Tab[-]    - Navigate between fields
 [green]Esc[-]    - Close Help
@@ -286,10 +290,30 @@ Press Esc to close this help.`)
 			a.switchMode()
 			return nil
 		case tcell.KeyEsc:
-			a.rootPages.HidePage("help")
-			return nil
+			// Handle modal closing first. If a modal is open, close it.
+			// Otherwise, fall back to hiding the help page.
+			if a.rootPages.HasPage("collectionSearchModal") {
+				a.rootPages.RemovePage("collectionSearchModal")
+				a.app.SetFocus(a.collectionsTree)
+				return nil
+			}
+			if a.rootPages.HasPage("help") {
+				a.rootPages.HidePage("help")
+				return nil
+			}
 		case tcell.KeyCtrlE:
 			a.toggleExplorerPanel()
+			return nil
+		case tcell.KeyCtrlF:
+			a.showCollectionSearchModal()
+			return nil
+		case tcell.KeyCtrlQ:
+			a.app.Stop()
+			return nil
+		case tcell.KeyCtrlC:
+			// This is the global handler. We return nil to prevent the default
+			// tview behavior of quitting the app on Ctrl+C.
+			// Copying is handled by individual widgets' input captures.
 			return nil
 		}
 		return event
@@ -356,41 +380,24 @@ func (a *App) switchMode() {
 	}
 }
 
-// fuzzyFind performs a simple, case-insensitive search to check if all characters
-// in the query appear in the target string in the correct order. /
-// fuzzyFind melakukan pencarian sederhana (case-insensitive) untuk memeriksa apakah semua karakter dalam query muncul dalam target secara berurutan.
-func fuzzyFind(query, target string) bool {
-	query = strings.ToLower(query)
-	target = strings.ToLower(target)
-
-	queryIndex := 0
-	for targetIndex := 0; targetIndex < len(target) && queryIndex < len(query); targetIndex++ {
-		if query[queryIndex] == target[targetIndex] {
-			queryIndex++
-		}
-	}
-
-	return queryIndex == len(query)
-}
-
 // updateGrpcMethodList filters the gRPC method list based on the user's query.
 // updateGrpcMethodList memfilter daftar method gRPC berdasarkan query pengguna.
 func (a *App) updateGrpcMethodList(query string) {
 	a.grpcMethodList.Clear()
 
 	if query == "" {
-		a.grpcAvailableMethods = nil
+		a.grpcAvailableMethods = a.grpcAllMethods // Show all when query is empty
 		a.hideMethodList()
 		return
 	}
 
+	// Use a proper fuzzy finder to get ranked matches.
+	// Menggunakan fuzzy finder untuk mendapatkan hasil yang terurut.
+	matches := fuzzy.Find(query, a.grpcAllMethods)
+
 	var matchedMethods []string
-	if query != "" {
-		for _, method := range a.grpcAllMethods {
-			if fuzzyFind(query, method) {
-				matchedMethods = append(matchedMethods, method)
-			}
-		}
+	for _, match := range matches {
+		matchedMethods = append(matchedMethods, match.Str)
 	}
 
 	a.grpcAvailableMethods = matchedMethods
@@ -794,6 +801,10 @@ func (a *App) showDeleteConfirmationModal() {
 			a.rootPages.RemovePage("deleteConfirmModal")
 		})
 
+	modal.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		return event // Allow default modal navigation
+	})
+
 	a.rootPages.AddPage("deleteConfirmModal", modal, true, true)
 }
 
@@ -839,6 +850,99 @@ func (a *App) createCollectionFolder(name string) {
 	parentData.Children = append(parentData.Children, newFolder)
 	a.populateCollectionsTree()
 	a.saveCollections()
+	a.flattenCollections()
+}
+
+// showCollectionSearchModal displays a Telescope-like modal for searching collections.
+// showCollectionSearchModal menampilkan modal seperti Telescope untuk mencari koleksi.
+func (a *App) showCollectionSearchModal() {
+	// The list to display search results.
+	resultsList := tview.NewList().ShowSecondaryText(false)
+
+	// The input field for the search query.
+	searchInput := tview.NewInputField().
+		SetLabel("Search Collections: ").
+		SetFieldBackgroundColor(tcell.ColorBlack)
+
+	// The main layout for the modal.
+	modalLayout := tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(searchInput, 1, 0, true).
+		AddItem(resultsList, 0, 1, false)
+	modalLayout.SetBorder(true).SetTitle("Telescope Search")
+
+	// Function to update search results.
+	updateResults := func(query string) {
+		resultsList.Clear()
+		a.collectionMatchedNodes = nil
+
+		if query == "" {
+			resultsList.AddItem("Type to search...", "", 0, nil)
+			return
+		}
+
+		var nodeNames []string
+		for _, node := range a.allCollectionNodes {
+			nodeNames = append(nodeNames, node.Name)
+		}
+
+		matches := fuzzy.Find(query, nodeNames)
+
+		if len(matches) > 0 {
+			for _, match := range matches {
+				originalNode := a.allCollectionNodes[match.Index]
+				a.collectionMatchedNodes = append(a.collectionMatchedNodes, originalNode)
+				icon := "📄"
+				if originalNode.IsFolder {
+					icon = "📁"
+				}
+				resultsList.AddItem(fmt.Sprintf("%s %s", icon, originalNode.Name), "", 0, nil)
+			}
+		} else {
+			resultsList.AddItem("No results found", "", 0, nil)
+		}
+	}
+
+	// Set initial state.
+	updateResults("")
+
+	// Link search input changes to the update function.
+	searchInput.SetChangedFunc(updateResults)
+
+	// Handle keyboard navigation between input and list.
+	searchInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyDown && resultsList.GetItemCount() > 0 {
+			a.app.SetFocus(resultsList)
+			return nil
+		}
+		return event
+	})
+	// Handle selection from the results list.
+	resultsList.SetSelectedFunc(func(index int, mainText, secondaryText string, shortcut rune) {
+		if index < len(a.collectionMatchedNodes) {
+			node := a.collectionMatchedNodes[index]
+			if node.Request != nil {
+				if node.Request.Type == "grpc" {
+					a.loadGrpcRequest(*node.Request)
+				} else {
+					a.loadRequest(*node.Request)
+				}
+			}
+			a.rootPages.RemovePage("collectionSearchModal")
+		}
+	})
+
+	resultsList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyUp && resultsList.GetCurrentItem() == 0 {
+			a.app.SetFocus(searchInput)
+			return nil
+		}
+		return event
+	})
+	// Create and show the modal page.
+	modal := a.createModal(modalLayout, 80, 15)
+	a.rootPages.AddPage("collectionSearchModal", modal, true, true)
+	a.app.SetFocus(searchInput)
 }
 
 // saveCurrentRequest gathers data from the UI and saves it as a new collection item.
@@ -915,6 +1019,7 @@ func (a *App) saveCurrentRequest(name string, requestType string) {
 
 	a.populateCollectionsTree()
 	a.saveCollections()
+	a.flattenCollections()
 }
 
 // populateCollectionsTree rebuilds the entire collections tree view from the data model.
@@ -924,6 +1029,23 @@ func (a *App) populateCollectionsTree() {
 	a.collectionsTree.SetRoot(rootNode).SetCurrentNode(rootNode)
 	a.addTreeNodes(rootNode, a.collectionsRoot.Children)
 	rootNode.SetExpanded(a.collectionsRoot.Expanded)
+	a.flattenCollections()
+}
+
+// flattenCollections creates a flat list of all nodes in the collection for searching.
+// flattenCollections membuat daftar datar dari semua node di koleksi untuk pencarian.
+func (a *App) flattenCollections() {
+	a.allCollectionNodes = nil
+	var recursiveFlatten func(nodes []*CollectionNode)
+	recursiveFlatten = func(nodes []*CollectionNode) {
+		for _, node := range nodes {
+			a.allCollectionNodes = append(a.allCollectionNodes, node)
+			if node.IsFolder && len(node.Children) > 0 {
+				recursiveFlatten(node.Children)
+			}
+		}
+	}
+	recursiveFlatten(a.collectionsRoot.Children)
 }
 
 // addTreeNodes is a recursive helper to add nodes to the collections tree view.
@@ -1208,6 +1330,7 @@ func (a *App) beautifyJSON(textArea *tview.TextArea) {
 		return
 	}
 	textArea.SetText(prettyJSON.String(), false)
+	// No need to copy here, Ctrl+C is now the standard way.
 }
 
 // toggleExplorerPanel shows or hides the left-side explorer panel.
