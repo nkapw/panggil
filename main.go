@@ -1301,6 +1301,10 @@ func (a *App) clearForm() {
 // loadRequest populates the HTTP view with data from a Request object.
 // loadRequest mengisi view HTTP dengan data dari sebuah object Request.
 func (a *App) loadRequest(req Request) {
+	// Switch to HTTP page if not already there.
+	// Pindah ke halaman HTTP jika belum di sana.
+	a.rootPages.SwitchToPage("http")
+
 	methods := []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
 	for i, m := range methods {
 		if m == req.Method {
