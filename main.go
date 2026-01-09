@@ -13,6 +13,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 	"github.com/sahilm/fuzzy"
+	"golang.design/x/clipboard"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -310,9 +311,9 @@ Press Esc to close this help.`)
 			a.app.Stop()
 			return nil
 		case tcell.KeyCtrlC:
-			// This is the global handler. We return nil to prevent the default
-			// tview behavior of quitting the app on Ctrl+C.
-			// Copying is handled by individual widgets' input captures.
+			// Copy text from focused widget to clipboard.
+			// Menyalin teks dari widget yang sedang fokus ke clipboard.
+			a.copyToClipboard()
 			return nil
 		}
 		return event
@@ -1384,6 +1385,39 @@ func (a *App) beautifyJSON(textArea *tview.TextArea) {
 	}
 	textArea.SetText(prettyJSON.String(), false)
 	// No need to copy here, Ctrl+C is now the standard way.
+}
+
+// copyToClipboard copies text from the currently focused widget to the system clipboard.
+// copyToClipboard menyalin teks dari widget yang sedang fokus ke clipboard sistem.
+func (a *App) copyToClipboard() {
+	var textToCopy string
+
+	focused := a.app.GetFocus()
+	switch widget := focused.(type) {
+	case *tview.TextArea:
+		textToCopy = widget.GetText()
+	case *tview.TextView:
+		textToCopy = widget.GetText(true)
+	case *tview.InputField:
+		textToCopy = widget.GetText()
+	default:
+		log.Printf("DEBUG: Cannot copy from widget type %T", focused)
+		return
+	}
+
+	if textToCopy == "" {
+		return
+	}
+
+	// Initialize clipboard (only needed once, but safe to call multiple times).
+	// Inisialisasi clipboard (hanya perlu sekali, tapi aman dipanggil berkali-kali).
+	if err := clipboard.Init(); err != nil {
+		log.Printf("ERROR: Failed to initialize clipboard: %v", err)
+		return
+	}
+
+	clipboard.Write(clipboard.FmtText, []byte(textToCopy))
+	log.Printf("INFO: Copied %d bytes to clipboard", len(textToCopy))
 }
 
 // toggleExplorerPanel shows or hides the left-side explorer panel.
