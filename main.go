@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 	"github.com/sahilm/fuzzy"
-	"golang.design/x/clipboard"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -1417,14 +1417,14 @@ func (a *App) copyToClipboard() {
 		return
 	}
 
-	// Initialize clipboard (only needed once, but safe to call multiple times).
-	// Inisialisasi clipboard (hanya perlu sekali, tapi aman dipanggil berkali-kali).
-	if err := clipboard.Init(); err != nil {
-		log.Printf("ERROR: Failed to initialize clipboard: %v", err)
+	// Initialize clipboard (not needed for atotto/clipboard).
+	// Inisialisasi clipboard (tidak diperlukan untuk atotto/clipboard).
+
+	if err := clipboard.WriteAll(textToCopy); err != nil {
+		log.Printf("ERROR: Failed to copy to clipboard: %v", err)
 		return
 	}
 
-	clipboard.Write(clipboard.FmtText, []byte(textToCopy))
 	log.Printf("INFO: Copied %d bytes to clipboard", len(textToCopy))
 }
 
