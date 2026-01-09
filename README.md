@@ -16,43 +16,66 @@
 - **HTTP Client**:
     - Supports common methods (GET, POST, PUT, DELETE, etc.).
     - JSON body and header editor.
-    - Support for various authentication methods (Bearer Token, Basic Auth).
+    - Support for various authentication methods (Bearer Token, Basic Auth, API Key).
 - **gRPC Client**:
     - Connect to gRPC servers and automatically discover services and methods using server reflection.
     - Live search for gRPC methods.
     - Auto-generates JSON request body templates.
 - **Collections & History**:
     - Save your requests into organized collections and folders.
+    - Visual indicators: 🌐 HTTP/REST, 🔌 gRPC, 📁 Folder.
     - Quickly access and re-run requests from your history.
+    - Auto-switch between HTTP/gRPC pages when loading a request.
+- **Clipboard Support**: Copy text from any field using `Ctrl+C`.
 - **Keyboard-Driven**: Designed for a fast, mouse-free workflow with intuitive keybindings.
+- **Cross-Platform**: Works on Linux, macOS, and Windows.
 
 ---
 
 ## Installation / Instalasi
 
-### Option 1: One-Liner Script (Recommended for macOS & Linux)
+### Linux & macOS
 
-You can install `panggil` with a single command using `curl`. This will automatically download the correct version for your system and install it.
+You can install `panggil` with a single command using `curl`:
 
 ```sh
 curl -sSL https://raw.githubusercontent.com/nkapw/panggil/main/install.sh | bash
 ```
+
 **Note:** You might be prompted for your password (`sudo`) to move the binary to `/usr/local/bin`.
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/nkapw/panggil/main/install.ps1 | iex
+```
+
+Or download and run manually:
+```powershell
+.\install.ps1
+```
 
 ### Manual Download
 
-Alternatively, you can download a pre-compiled binary for your operating system from the GitHub Releases page and place it in a directory within your system's `PATH`.
+Download a pre-compiled binary for your operating system from the [GitHub Releases](https://github.com/nkapw/panggil/releases) page.
 
-### Option 2: Building from Source
+### Building from Source
 
-If you have Go installed, you can build `panggil` from source:
+If you have Go installed:
 
 ```sh
 git clone https://github.com/nkapw/panggil.git
 cd panggil
-go build -o panggil
+make build
 ./panggil
 ```
+
+Or without make:
+```sh
+go build -o panggil .
+./panggil
+```
+
 ---
 
 ## Usage & Keybindings / Penggunaan & Keybindings
@@ -69,8 +92,31 @@ The application is designed to be controlled primarily with the keyboard.
 | `F9`        | Focus Collections Panel              |
 | `F12`       | Switch between HTTP and gRPC modes   |
 | `Ctrl+E`    | Toggle Explorer (Collections/History)|
-| `Ctrl+C`    | Quit Application                     |
+| `Ctrl+F`    | Search Collections (Telescope)       |
+| `Ctrl+C`    | Copy text from focused field         |
+| `Ctrl+Q`    | Quit Application                     |
 | `Tab`       | Navigate between fields              |
 | `Esc`       | Close modals or popups               |
 
 ---
+
+## Make Commands
+
+```sh
+make help       # Show all available commands
+make build      # Build the binary
+make run        # Build and run the application
+make install    # Install to /usr/local/bin
+make uninstall  # Remove from /usr/local/bin
+make release    # Build release binaries for all platforms
+make version    # Show version information
+make clean      # Remove build artifacts
+make test       # Run tests
+make lint       # Run linters
+```
+
+---
+
+## License
+
+MIT License - See [LICENSE](LICENSE) for details.
