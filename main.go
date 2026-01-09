@@ -899,9 +899,13 @@ func (a *App) showCollectionSearchModal() {
 			for _, match := range matches {
 				originalNode := a.allCollectionNodes[match.Index]
 				a.collectionMatchedNodes = append(a.collectionMatchedNodes, originalNode)
-				icon := "📄"
+				var icon string
 				if originalNode.IsFolder {
 					icon = "📁"
+				} else if originalNode.Request != nil && originalNode.Request.Type == "grpc" {
+					icon = "🔌" // gRPC
+				} else {
+					icon = "🌐" // HTTP/REST
 				}
 				resultsList.AddItem(fmt.Sprintf("%s %s", icon, originalNode.Name), "", 0, nil)
 			}
@@ -1062,9 +1066,13 @@ func (a *App) flattenCollections() {
 // addTreeNodes adalah helper rekursif untuk menambahkan node ke tree view Collections.
 func (a *App) addTreeNodes(parent *tview.TreeNode, children []*CollectionNode) {
 	for _, childData := range children {
-		icon := "📄"
+		var icon string
 		if childData.IsFolder {
 			icon = "📁"
+		} else if childData.Request != nil && childData.Request.Type == "grpc" {
+			icon = "🔌" // gRPC indicator / Penanda gRPC
+		} else {
+			icon = "🌐" // HTTP/REST indicator / Penanda HTTP/REST
 		}
 		node := tview.NewTreeNode(fmt.Sprintf("%s %s", icon, childData.Name)).
 			SetReference(childData).
