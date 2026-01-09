@@ -25,6 +25,14 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
+// Version information injected at build time via ldflags.
+// Informasi versi yang diinjeksi saat build via ldflags.
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+	GitCommit = "unknown"
+)
+
 // App encapsulates all the components and state of the TUI application.
 // App membungkus semua komponen dan state dari aplikasi TUI.
 type App struct {
