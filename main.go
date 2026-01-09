@@ -20,7 +20,6 @@ import (
 	"github.com/jhump/protoreflect/dynamic/grpcdynamic"
 	"github.com/jhump/protoreflect/grpcreflect"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 
 	"google.golang.org/grpc/metadata"
 )
@@ -535,7 +534,14 @@ func (a *App) grpcConnect(onSuccess func()) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		conn, err := grpc.DialContext(ctx, serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+		// Using DialContext to establish connection immediately for reflection.
+		// grpc.NewClient is lazy and doesn't connect until first RPC, which breaks reflection.
+		// Menggunakan DialContext untuk membuat koneksi langsung untuk reflection.
+		// grpc.NewClient bersifat lazy dan tidak connect sampai RPC pertama, yang membuat reflection gagal.
+		conn, err := grpc.DialContext(ctx, serverAddr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithBlock(),
+		)
 		if err != nil {
 			a.app.QueueUpdateDraw(func() {
 				log.Printf("ERROR: gRPC dial failed for %s: %v", serverAddr, err)
@@ -547,8 +553,9 @@ func (a *App) grpcConnect(onSuccess func()) {
 		a.grpcConn = conn
 		a.grpcStub = grpcdynamic.NewStub(conn)
 
-		reflectionClient := grpc_reflection_v1alpha.NewServerReflectionClient(a.grpcConn)
-		a.grpcReflectClient = grpcreflect.NewClient(ctx, reflectionClient)
+		// Use NewClientAuto for reflection (auto-detects v1 or v1alpha).
+		// Menggunakan NewClientAuto untuk reflection (auto-detect v1 atau v1alpha).
+		a.grpcReflectClient = grpcreflect.NewClientAuto(ctx, a.grpcConn)
 		services, err := a.grpcReflectClient.ListServices()
 		if err != nil {
 			a.app.QueueUpdateDraw(func() {
@@ -971,21 +978,24 @@ func (a *App) saveCurrentRequest(name string, requestType string) {
 
 		headers := make(map[string]string)
 		if headersText != "" {
-			_ = json.Unmarshal([]byte(headersText), &headers)
+			if err := json.Unmarshal([]byte(headersText), &headers); err != nil {
+				log.Printf("WARN: Headers JSON is invalid, will be saved as raw text: %v", err)
+			}
 		}
 
 		requestData = &Request{
-			Name:      name,
-			Type:      "http",
-			Method:    method,
-			URL:       url,
-			Headers:   headers,
-			AuthType:  authTypeIndex,
-			AuthToken: authToken,
-			AuthUser:  authUser,
-			AuthPass:  authPass,
-			Body:      body,
-			Time:      time.Now(),
+			Name:       name,
+			Type:       "http",
+			Method:     method,
+			URL:        url,
+			Headers:    headers,
+			HeadersRaw: headersText, // Always save raw text / Selalu simpan teks mentah
+			AuthType:   authTypeIndex,
+			AuthToken:  authToken,
+			AuthUser:   authUser,
+			AuthPass:   authPass,
+			Body:       body,
+			Time:       time.Now(),
 		}
 	}
 
@@ -1095,6 +1105,21 @@ func removeNode(slice []*CollectionNode, node *CollectionNode) []*CollectionNode
 	return slice
 }
 
+// getAuthTypeIndex converts auth type string to its corresponding index.
+// getAuthTypeIndex mengkonversi string auth type ke index yang sesuai.
+func getAuthTypeIndex(authType string) int {
+	switch authType {
+	case "Bearer Token":
+		return 1
+	case "Basic Auth":
+		return 2
+	case "API Key":
+		return 3
+	default:
+		return 0
+	}
+}
+
 // updateAuthPanel dynamically changes the authentication input fields based on the selected auth type.
 // updateAuthPanel secara dinamis mengubah field input otentikasi berdasarkan auth type yang dipilih.
 func (a *App) updateAuthPanel(authType int) {
@@ -1109,6 +1134,9 @@ func (a *App) updateAuthPanel(authType int) {
 		a.authPanel.AddItem(noAuthText, 0, 1, false)
 
 	case 1: // Bearer Token
+		// Reset label in case it was changed by API Key.
+		// Reset label jika sebelumnya diubah oleh API Key.
+		a.authToken.SetLabel("Token: ")
 		a.authPanel.AddItem(a.authToken, 0, 1, false)
 
 	case 2: // Basic Auth
@@ -1118,10 +1146,10 @@ func (a *App) updateAuthPanel(authType int) {
 		a.authPanel.AddItem(basicFlex, 0, 1, false)
 
 	case 3: // API Key
-		apiKeyInput := tview.NewInputField().
-			SetLabel("API Key: ").
-			SetFieldBackgroundColor(tcell.ColorBlack)
-		a.authPanel.AddItem(apiKeyInput, 0, 1, false)
+		// Reuse authToken field for API Key to persist the value.
+		// Menggunakan kembali field authToken untuk API Key agar nilainya tersimpan.
+		a.authToken.SetLabel("API Key: ")
+		a.authPanel.AddItem(a.authToken, 0, 1, false)
 	}
 }
 
@@ -1212,13 +1240,17 @@ func (a *App) sendRequest() {
 	}()
 
 	historyReq := Request{
-		Method:  requestData.Method,
-		URL:     requestData.URL,
-		Headers: requestData.Headers,
-		Body:    requestData.Body,
-		Time:    time.Now(),
+		Method:    requestData.Method,
+		URL:       requestData.URL,
+		Headers:   requestData.Headers,
+		Body:      requestData.Body,
+		Time:      time.Now(),
+		Type:      "http",
+		AuthType:  getAuthTypeIndex(requestData.AuthType),
+		AuthToken: requestData.AuthToken,
+		AuthUser:  requestData.AuthUser,
+		AuthPass:  requestData.AuthPass,
 	}
-	historyReq.Type = "http"
 	a.history = append([]Request{historyReq}, a.history...)
 
 	a.updateHistoryView()
@@ -1235,7 +1267,10 @@ func (a *App) updateHistoryView() {
 		} else {
 			title = fmt.Sprintf("[%s] %s (%s)", req.Method, req.URL, req.Time.Format("15:04:05"))
 		}
-		a.historyList.AddItem(title, "", 0, func() { a.loadRequestFromHistory(i) })
+		// Capture the index in a local variable to avoid closure issue.
+		// Menangkap index di variabel lokal untuk menghindari masalah closure.
+		index := i
+		a.historyList.AddItem(title, "", 0, func() { a.loadRequestFromHistory(index) })
 	}
 }
 
@@ -1274,7 +1309,13 @@ func (a *App) loadRequest(req Request) {
 
 	a.urlInput.SetText(req.URL)
 
-	if len(req.Headers) > 0 {
+	// Prefer HeadersRaw (exact user input) over marshaling Headers map.
+	// Prioritaskan HeadersRaw (input user yang asli) daripada marshal Headers map.
+	if req.HeadersRaw != "" {
+		a.headersText.SetText(req.HeadersRaw, false)
+	} else if len(req.Headers) > 0 {
+		// Fallback for backward compatibility with old saved requests.
+		// Fallback untuk kompatibilitas dengan request yang disimpan sebelumnya.
 		headersJSON, _ := json.MarshalIndent(req.Headers, "", "  ")
 		a.headersText.SetText(string(headersJSON), false)
 	} else {
