@@ -96,8 +96,22 @@ func (a *App) createGrpcPage() {
 
 	bottomRow := tview.NewFlex()
 	middlePanel := tview.NewFlex().SetDirection(tview.FlexRow)
+
+	// Metadata section with buttons
 	a.grpcRequestMeta = tview.NewTextArea().SetPlaceholder("Metadata (JSON format)...")
-	a.grpcRequestMeta.SetBorder(true).SetTitle(" Metadata ")
+	metaBeautifyBtn := tview.NewButton("Beautify").SetSelectedFunc(func() {
+		a.beautifyJSON(a.grpcRequestMeta)
+	})
+	metaClearBtn := tview.NewButton("Clear").SetSelectedFunc(func() {
+		a.grpcRequestMeta.SetText("", true)
+	})
+	metaButtons := tview.NewFlex().AddItem(tview.NewBox(), 0, 1, false).AddItem(metaBeautifyBtn, 10, 0, false).AddItem(metaClearBtn, 7, 0, false)
+	metaLayout := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(metaButtons, 1, 0, false).
+		AddItem(a.grpcRequestMeta, 0, 1, false)
+	metaLayout.SetBorder(true).SetTitle(" Metadata ")
+
+	// Request Body section with buttons
 	a.grpcRequestBody = tview.NewTextArea().SetPlaceholder("Select a service method to see the request body template...")
 
 	bodyLayout := tview.NewFlex().SetDirection(tview.FlexRow)
@@ -113,7 +127,7 @@ func (a *App) createGrpcPage() {
 	grpcBodyButtons := tview.NewFlex().AddItem(tview.NewBox(), 0, 1, false).AddItem(grpcGenerateBtn, 10, 0, false).AddItem(grpcBeautifyBtn, 10, 0, false).AddItem(grpcClearBtn, 7, 0, false)
 	bodyLayout.AddItem(grpcBodyButtons, 1, 0, false).AddItem(a.grpcRequestBody, 0, 1, false)
 	bodyLayout.SetBorder(true).SetTitle(" Request Body ")
-	middlePanel.AddItem(a.grpcRequestMeta, 0, 1, false).AddItem(bodyLayout, 0, 2, false)
+	middlePanel.AddItem(metaLayout, 0, 1, false).AddItem(bodyLayout, 0, 2, false)
 
 	a.grpcResponseView = tview.NewTextView().SetDynamicColors(true).SetScrollable(true).SetWordWrap(true)
 	a.grpcResponseView.SetBorder(true).SetTitle("Response")

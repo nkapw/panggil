@@ -31,11 +31,23 @@ func (a *App) createHttpPage() *tview.Flex {
 
 	a.createAuthPanel()
 
+	// Headers section with buttons
 	a.headersText = tview.NewTextArea().
 		SetPlaceholder("Headers (JSON format):\n{\n  \"Content-Type\": \"application/json\"\n}")
-	a.headersText.SetBorder(true).SetTitle("Headers")
 	a.headersText.SetBackgroundColor(tcell.ColorBlack)
+	httpHeadersBeautifyBtn := tview.NewButton("Beautify").SetSelectedFunc(func() {
+		a.beautifyJSON(a.headersText)
+	})
+	httpHeadersClearBtn := tview.NewButton("Clear").SetSelectedFunc(func() {
+		a.headersText.SetText("", true)
+	})
+	httpHeadersButtons := tview.NewFlex().AddItem(tview.NewBox(), 0, 1, false).AddItem(httpHeadersBeautifyBtn, 10, 0, false).AddItem(httpHeadersClearBtn, 7, 0, false)
+	httpHeadersLayout := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(httpHeadersButtons, 1, 0, false).
+		AddItem(a.headersText, 0, 1, false)
+	httpHeadersLayout.SetBorder(true).SetTitle(" Headers ")
 
+	// Body section with buttons
 	a.bodyText = tview.NewTextArea().
 		SetPlaceholder("Request Body (for POST, PUT, PATCH)")
 	a.bodyText.SetBackgroundColor(tcell.ColorBlack)
@@ -52,7 +64,7 @@ func (a *App) createHttpPage() *tview.Flex {
 
 	leftPanel.AddItem(topFlex, 3, 0, false)
 	leftPanel.AddItem(a.authPanel, 3, 0, false)
-	leftPanel.AddItem(a.headersText, 0, 1, false)
+	leftPanel.AddItem(httpHeadersLayout, 0, 1, false)
 	leftPanel.AddItem(httpBodyLayout, 0, 1, false)
 
 	a.httpRightPanel = tview.NewFlex().SetDirection(tview.FlexRow)
