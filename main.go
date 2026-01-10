@@ -233,46 +233,47 @@ func (a *App) Init() {
 
 	helpText := tview.NewTextView().
 		SetDynamicColors(true).
-		SetText(`[yellow]Keyboard Shortcuts:[-]
+		SetScrollable(true).
+		SetText(`[yellow]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[-]
+[yellow]                 KEYBOARD SHORTCUTS                 [-]
+[yellow]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[-]
 
-[green]F5[-]     - Send Request
-[green]F6[-]     - Clear Form
-[green]F7[-]     - Focus History
-[green]F8[-]     - Save Request to Collection
-[green]F9[-]     - Focus Collections
-[green]F12[-]    - Switch HTTP/gRPC Mode 
-[green]F1[-]     - Show Help
-[green]Ctrl+F[-] - Search Collections (Telescope)
-[green]Ctrl+C[-] - Copy text from focused field
-[green]Ctrl+Q[-] - Quit Application
-[green]Ctrl+E[-] - Toggle Collections/History Panel
-[green]Tab[-]    - Navigate between fields
-[green]Esc[-]    - Close Help
+[cyan]Global:[-]
+  [green]F1[-]      Show Help
+  [green]F5[-]      Send Request
+  [green]F6[-]      Clear Form
+  [green]F7[-]      Focus History Panel
+  [green]F8[-]      Save Request to Collection
+  [green]F9[-]      Focus Collections Panel
+  [green]F10[-]     Environment Variables
+  [green]F12[-]     Switch HTTP/gRPC Mode
 
-[yellow]Usage:[-]
-1. Select HTTP method
-2. Enter URL
-3. Select authentication type (Bearer Token, Basic Auth, etc.)
-4. Add headers in JSON format (optional)
-5. Add request body for POST/PUT/PATCH (optional)
-6. Press F5 or click Send Request
-7. Press F8 to save the request to your collection
-7. View response in the right panel
-8. Access previous requests from History
+[cyan]Navigation:[-]
+  [green]Ctrl+E[-]  Toggle Explorer Panel
+  [green]Ctrl+F[-]  Search Collections (Telescope)
+  [green]Tab[-]     Navigate between fields
+  [green]Esc[-]     Close modals/popups
 
-[yellow]Resizing Panels with Mouse:[-]
-1. Move your mouse cursor over the border between two panels.
-2. Click and drag the border to adjust the size.
-[yellow]Authorization Types:[-]
-- [green]No Auth[-]: No authentication
-- [green]Bearer Token[-]: JWT or OAuth tokens
-- [green]Basic Auth[-]: Username and password
-- [green]API Key[-]: Add manually in headers
+[cyan]Editing:[-]
+  [green]Ctrl+C[-]  Copy (selected text or focused field)
+  [green]Ctrl+Q[-]  Quit Application
 
-Press Esc to close this help.`)
-	helpText.SetBorder(true).SetTitle("Help")
+[cyan]Environment Variables Modal (F10):[-]
+  [green]a[-]       Add new variable
+  [green]e[-]       Edit selected variable
+  [green]d[-]       Delete selected variable
+  [green]Esc[-]     Close modal
 
-	a.rootPages.AddPage("help", a.createModal(helpText, 60, 20), true, false)
+[cyan]Using Variables:[-]
+  Use [green]{{VAR_NAME}}[-] in URL, headers, body, or metadata.
+  Example: [green]{{BASE_URL}}/api/users[-]
+
+[yellow]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[-]
+              Press [green]Esc[-] to close this help
+[yellow]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[-]`)
+	helpText.SetBorder(true).SetTitle(" Help (F1) ")
+
+	a.rootPages.AddPage("help", a.createModal(helpText, 55, 30), true, false)
 
 	// Set global key bindings for the application.
 	// Mengatur key bindings global untuk aplikasi.
