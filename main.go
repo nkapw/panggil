@@ -91,6 +91,11 @@ type App struct {
 	collectionMatchedNodes []*CollectionNode
 
 	explorerPanelVisible bool
+
+	// Environment variables / Variabel environment
+	environments   []*Environment
+	activeEnvIndex int
+	envDropdown    *tview.DropDown
 }
 
 // loadCollections reads the collections data from a JSON file in the config directory.
@@ -134,9 +139,11 @@ func NewApp() *App {
 		},
 		grpcBodyCache:        make(map[string]string),
 		explorerPanelVisible: false, // Explorer panel is hidden by default. / Explorer panel disembunyikan secara default.
+		activeEnvIndex:       0,
 	}
 	app.loadCollections()
 	app.loadGrpcCache()
+	app.loadEnvironments()
 	return app
 }
 
@@ -322,6 +329,11 @@ Press Esc to close this help.`)
 			// Copy text from focused widget to clipboard.
 			// Menyalin teks dari widget yang sedang fokus ke clipboard.
 			a.copyToClipboard()
+			return nil
+		case tcell.KeyF10:
+			// Open environment variables modal.
+			// Membuka modal variabel environment.
+			a.showEnvironmentModal()
 			return nil
 		}
 		return event
@@ -648,7 +660,8 @@ func (a *App) sendGrpcRequest() {
 
 		req := md.GetInputType()
 		dynMsg := dynamic.NewMessage(req)
-		bodyText := a.grpcRequestBody.GetText()
+		// Replace environment variables in body
+		bodyText := a.replaceVariables(a.grpcRequestBody.GetText())
 		if bodyText != "" {
 			if err := dynMsg.UnmarshalJSON([]byte(bodyText)); err != nil {
 				log.Printf("ERROR: Failed to unmarshal gRPC request body JSON: %v", err)
@@ -662,7 +675,8 @@ func (a *App) sendGrpcRequest() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		metaText := a.grpcRequestMeta.GetText()
+		// Replace environment variables in metadata
+		metaText := a.replaceVariables(a.grpcRequestMeta.GetText())
 		if metaText != "" {
 			var metaMap map[string]string
 			if err := json.Unmarshal([]byte(metaText), &metaMap); err != nil {
@@ -1188,12 +1202,17 @@ func (a *App) sendRequest() {
 	_, method := a.methodDrop.GetCurrentOption()
 	_, authType := a.authType.GetCurrentOption()
 
+	// Replace environment variables in URL and body
+	url := a.replaceVariables(a.urlInput.GetText())
+	body := a.replaceVariables(a.bodyText.GetText())
+	authToken := a.replaceVariables(a.authToken.GetText())
+
 	requestData := HttpRequestData{
 		Method:    method,
-		URL:       a.urlInput.GetText(),
-		Body:      a.bodyText.GetText(),
+		URL:       url,
+		Body:      body,
 		AuthType:  authType,
-		AuthToken: a.authToken.GetText(),
+		AuthToken: authToken,
 		AuthUser:  a.authUser.GetText(),
 		AuthPass:  a.authPass.GetText(),
 		Headers:   make(map[string]string),
@@ -1204,7 +1223,7 @@ func (a *App) sendRequest() {
 		return
 	}
 
-	headersJSON := a.headersText.GetText()
+	headersJSON := a.replaceVariables(a.headersText.GetText())
 	if headersJSON != "" {
 		if err := json.Unmarshal([]byte(headersJSON), &requestData.Headers); err != nil {
 			a.statusText.SetText(fmt.Sprintf("[red]Error parsing headers: %v", err))
@@ -1439,6 +1458,170 @@ func (a *App) toggleExplorerPanel() {
 	}
 }
 
+// replaceVariables replaces {{variable}} placeholders in text with values from the active environment.
+// replaceVariables mengganti placeholder {{variable}} dalam teks dengan nilai dari environment aktif.
+func (a *App) replaceVariables(text string) string {
+	if len(a.environments) == 0 || a.activeEnvIndex >= len(a.environments) {
+		return text
+	}
+	env := a.environments[a.activeEnvIndex]
+	for key, value := range env.Variables {
+		placeholder := "{{" + key + "}}"
+		text = strings.ReplaceAll(text, placeholder, value)
+	}
+	return text
+}
+
+// showEnvironmentModal displays a modal for managing environment variables.
+// showEnvironmentModal menampilkan modal untuk mengelola variabel environment.
+func (a *App) showEnvironmentModal() {
+	env := a.environments[a.activeEnvIndex]
+
+	// Create variable list
+	varList := tview.NewList().ShowSecondaryText(true)
+	varList.SetBorder(true).SetTitle(" Variables ")
+
+	refreshList := func() {
+		varList.Clear()
+		for key, value := range env.Variables {
+			displayValue := value
+			if len(displayValue) > 30 {
+				displayValue = displayValue[:27] + "..."
+			}
+			varList.AddItem(key, displayValue, 0, nil)
+		}
+		if varList.GetItemCount() == 0 {
+			varList.AddItem("[gray]No variables", "Press 'a' to add", 0, nil)
+		}
+	}
+	refreshList()
+
+	// Create buttons
+	addBtn := tview.NewButton("Add (a)").SetSelectedFunc(func() {
+		a.showAddVariableModal(env, refreshList)
+	})
+	editBtn := tview.NewButton("Edit (e)").SetSelectedFunc(func() {
+		if varList.GetItemCount() > 0 {
+			key, _ := varList.GetItemText(varList.GetCurrentItem())
+			if key != "[gray]No variables" {
+				a.showEditVariableModal(env, key, refreshList)
+			}
+		}
+	})
+	deleteBtn := tview.NewButton("Delete (d)").SetSelectedFunc(func() {
+		if varList.GetItemCount() > 0 {
+			key, _ := varList.GetItemText(varList.GetCurrentItem())
+			if key != "[gray]No variables" {
+				delete(env.Variables, key)
+				refreshList()
+			}
+		}
+	})
+	closeBtn := tview.NewButton("Close (Esc)").SetSelectedFunc(func() {
+		a.rootPages.RemovePage("envModal")
+	})
+
+	buttons := tview.NewFlex().
+		AddItem(addBtn, 10, 0, false).
+		AddItem(editBtn, 11, 0, false).
+		AddItem(deleteBtn, 13, 0, false).
+		AddItem(tview.NewBox(), 0, 1, false).
+		AddItem(closeBtn, 13, 0, false)
+
+	content := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(varList, 0, 1, true).
+		AddItem(buttons, 1, 0, false)
+	content.SetBorder(true).SetTitle(fmt.Sprintf(" Environment: %s ", env.Name))
+
+	// Handle keyboard shortcuts
+	varList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Rune() {
+		case 'a':
+			a.showAddVariableModal(env, refreshList)
+			return nil
+		case 'e':
+			if varList.GetItemCount() > 0 {
+				key, _ := varList.GetItemText(varList.GetCurrentItem())
+				if key != "[gray]No variables" {
+					a.showEditVariableModal(env, key, refreshList)
+				}
+			}
+			return nil
+		case 'd':
+			if varList.GetItemCount() > 0 {
+				key, _ := varList.GetItemText(varList.GetCurrentItem())
+				if key != "[gray]No variables" {
+					delete(env.Variables, key)
+					refreshList()
+				}
+			}
+			return nil
+		}
+		if event.Key() == tcell.KeyEsc {
+			a.rootPages.RemovePage("envModal")
+			return nil
+		}
+		return event
+	})
+
+	modal := a.createModal(content, 60, 20)
+	a.rootPages.AddPage("envModal", modal, true, true)
+	a.app.SetFocus(varList)
+}
+
+// showAddVariableModal displays a form to add a new variable.
+// showAddVariableModal menampilkan form untuk menambah variabel baru.
+func (a *App) showAddVariableModal(env *Environment, onSave func()) {
+	form := tview.NewForm()
+	form.AddInputField("Name", "", 30, nil, nil)
+	form.AddInputField("Value", "", 30, nil, nil)
+	form.AddButton("Save", func() {
+		name := form.GetFormItem(0).(*tview.InputField).GetText()
+		value := form.GetFormItem(1).(*tview.InputField).GetText()
+		if name != "" {
+			env.Variables[name] = value
+			onSave()
+		}
+		a.rootPages.RemovePage("addVarModal")
+	})
+	form.AddButton("Cancel", func() {
+		a.rootPages.RemovePage("addVarModal")
+	})
+	form.SetBorder(true).SetTitle(" Add Variable ")
+
+	modal := a.createModal(form, 50, 10)
+	a.rootPages.AddPage("addVarModal", modal, true, true)
+	a.app.SetFocus(form)
+}
+
+// showEditVariableModal displays a form to edit an existing variable.
+// showEditVariableModal menampilkan form untuk mengedit variabel yang ada.
+func (a *App) showEditVariableModal(env *Environment, key string, onSave func()) {
+	form := tview.NewForm()
+	form.AddInputField("Name", key, 30, nil, nil)
+	form.AddInputField("Value", env.Variables[key], 30, nil, nil)
+	form.AddButton("Save", func() {
+		newName := form.GetFormItem(0).(*tview.InputField).GetText()
+		newValue := form.GetFormItem(1).(*tview.InputField).GetText()
+		if newName != "" {
+			if newName != key {
+				delete(env.Variables, key)
+			}
+			env.Variables[newName] = newValue
+			onSave()
+		}
+		a.rootPages.RemovePage("editVarModal")
+	})
+	form.AddButton("Cancel", func() {
+		a.rootPages.RemovePage("editVarModal")
+	})
+	form.SetBorder(true).SetTitle(" Edit Variable ")
+
+	modal := a.createModal(form, 50, 10)
+	a.rootPages.AddPage("editVarModal", modal, true, true)
+	a.app.SetFocus(form)
+}
+
 // Run starts the application's event loop.
 // Run memulai event loop dari aplikasi.
 func (a *App) Run() error {
@@ -1455,6 +1638,7 @@ func main() {
 	defer func() {
 		app.saveCollections()
 		app.saveGrpcCache()
+		app.saveEnvironments()
 		log.Println("INFO: Application shutting down.")
 	}()
 

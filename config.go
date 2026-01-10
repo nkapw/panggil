@@ -76,3 +76,48 @@ func (a *App) saveGrpcCache() {
 		log.Printf("ERROR: Failed to write gRPC cache file: %v", err)
 	}
 }
+
+// loadEnvironments reads the environments data from a JSON file.
+// loadEnvironments membaca data environments dari file JSON.
+func (a *App) loadEnvironments() {
+	path, _ := getConfigPath("environments.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("INFO: Environments file not found, creating default environment")
+		// Create default environment
+		a.environments = []*Environment{
+			{
+				Name:      "Default",
+				Variables: make(map[string]string),
+			},
+		}
+		return
+	}
+	if err := json.Unmarshal(data, &a.environments); err != nil {
+		log.Printf("ERROR: Failed to unmarshal environments: %v", err)
+		a.environments = []*Environment{
+			{
+				Name:      "Default",
+				Variables: make(map[string]string),
+			},
+		}
+	}
+}
+
+// saveEnvironments serializes the environments data to a JSON file.
+// saveEnvironments melakukan serialisasi data environments ke file JSON.
+func (a *App) saveEnvironments() {
+	path, err := getConfigPath("environments.json")
+	if err != nil {
+		log.Printf("ERROR: Could not get config path for environments: %v", err)
+		return
+	}
+	data, err := json.MarshalIndent(a.environments, "", "  ")
+	if err != nil {
+		log.Printf("ERROR: Failed to marshal environments: %v", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		log.Printf("ERROR: Failed to write environments file: %v", err)
+	}
+}

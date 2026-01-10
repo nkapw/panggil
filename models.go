@@ -35,3 +35,10 @@ type CollectionNode struct {
 	Children []*CollectionNode `json:"children,omitempty"`
 	Expanded bool              `json:"-"` // Excluded from JSON serialization. / Dikecualikan dari serialisasi JSON.
 }
+
+// Environment represents a set of variables that can be used in requests.
+// Environment merepresentasikan sekumpulan variabel yang dapat digunakan dalam request.
+type Environment struct {
+	Name      string            `json:"name"`
+	Variables map[string]string `json:"variables"`
+}
