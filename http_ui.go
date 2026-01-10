@@ -74,13 +74,20 @@ func (a *App) createHttpPage() *tview.Flex {
 		SetText("[yellow]Ready to send request")
 	a.statusText.SetBorder(true).SetTitle("Status")
 
-	a.responseText = tview.NewTextView().
-		SetDynamicColors(true).
-		SetScrollable(true).
-		SetWordWrap(true)
-	a.responseText.SetBorder(true).SetTitle("Response")
+	a.responseText = tview.NewTextArea()
+	a.responseText.SetPlaceholder("Response will appear here...")
 
-	a.httpRightPanel.AddItem(a.statusText, 3, 0, false).AddItem(a.responseText, 0, 1, false)
+	// Response panel with Copy button
+	httpCopyResponseBtn := tview.NewButton("Copy").SetSelectedFunc(func() {
+		a.copyTextAreaToClipboard(a.responseText)
+	})
+	httpResponseButtons := tview.NewFlex().AddItem(tview.NewBox(), 0, 1, false).AddItem(httpCopyResponseBtn, 6, 0, false)
+	httpResponseLayout := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(httpResponseButtons, 1, 0, false).
+		AddItem(a.responseText, 0, 1, false)
+	httpResponseLayout.SetBorder(true).SetTitle(" Response ")
+
+	a.httpRightPanel.AddItem(a.statusText, 3, 0, false).AddItem(httpResponseLayout, 0, 1, false)
 	httpFlex.AddItem(leftPanel, 0, 1, true).AddItem(a.httpRightPanel, 0, 1, false)
 
 	return httpFlex

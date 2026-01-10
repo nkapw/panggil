@@ -129,9 +129,20 @@ func (a *App) createGrpcPage() {
 	bodyLayout.SetBorder(true).SetTitle(" Request Body ")
 	middlePanel.AddItem(metaLayout, 0, 1, false).AddItem(bodyLayout, 0, 2, false)
 
-	a.grpcResponseView = tview.NewTextView().SetDynamicColors(true).SetScrollable(true).SetWordWrap(true)
-	a.grpcResponseView.SetBorder(true).SetTitle("Response")
-	bottomRow.AddItem(middlePanel, 0, 1, false).AddItem(a.grpcResponseView, 0, 1, false)
+	a.grpcResponseView = tview.NewTextArea()
+	a.grpcResponseView.SetPlaceholder("Response will appear here...")
+
+	// Response panel with Copy button
+	grpcCopyResponseBtn := tview.NewButton("Copy").SetSelectedFunc(func() {
+		a.copyTextAreaToClipboard(a.grpcResponseView)
+	})
+	grpcResponseButtons := tview.NewFlex().AddItem(tview.NewBox(), 0, 1, false).AddItem(grpcCopyResponseBtn, 6, 0, false)
+	grpcResponseLayout := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(grpcResponseButtons, 1, 0, false).
+		AddItem(a.grpcResponseView, 0, 1, false)
+	grpcResponseLayout.SetBorder(true).SetTitle(" Response ")
+
+	bottomRow.AddItem(middlePanel, 0, 1, false).AddItem(grpcResponseLayout, 0, 1, false)
 
 	mainContent.AddItem(topRow, 3, 0, true).AddItem(a.grpcStatusText, 3, 0, false).AddItem(bottomRow, 0, 1, false)
 	grpcFlex.AddItem(mainContent, 0, 1, false)
@@ -156,7 +167,7 @@ func (a *App) selectGrpcMethod(methodName string) {
 	a.grpcMethodInput.SetText(methodName)
 	a.grpcStatusText.SetText(fmt.Sprintf("Selected: [green]%s", methodName))
 
-	a.grpcResponseView.SetText("")
+	a.grpcResponseView.SetText("", true)
 	a.grpcRequestMeta.SetText("", true)
 	a.grpcRequestBody.SetText("", true)
 	a.generateGrpcBodyTemplate(methodName, "")

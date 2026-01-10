@@ -60,7 +60,7 @@ type App struct {
 	authPanel      *tview.Flex
 	headersText    *tview.TextArea
 	bodyText       *tview.TextArea
-	responseText   *tview.TextView
+	responseText   *tview.TextArea // Changed to TextArea for text selection
 	statusText     *tview.TextView // Shared status text for HTTP view / Teks status bersama untuk view HTTP
 
 	// gRPC view components / Komponen view gRPC
@@ -70,7 +70,7 @@ type App struct {
 	grpcMethodSelector *tview.Flex
 	grpcRequestMeta    *tview.TextArea
 	grpcRequestBody    *tview.TextArea
-	grpcResponseView   *tview.TextView
+	grpcResponseView   *tview.TextArea // Changed to TextArea for text selection
 	grpcStatusText     *tview.TextView
 
 	// gRPC client and reflection state / State client gRPC dan reflection
@@ -628,7 +628,7 @@ func (a *App) sendGrpcRequest() {
 	}
 
 	a.grpcStatusText.SetText(fmt.Sprintf("[yellow]Sending request to %s...", a.grpcCurrentService))
-	a.grpcResponseView.SetText("")
+	a.grpcResponseView.SetText("", true)
 
 	go func() {
 		parts := strings.SplitN(a.grpcCurrentService, "/", 2)
@@ -698,7 +698,7 @@ func (a *App) sendGrpcRequest() {
 			if err != nil {
 				log.Printf("ERROR: gRPC InvokeRpc failed for %s: %v", a.grpcCurrentService, err)
 				a.grpcStatusText.SetText(fmt.Sprintf("[red]RPC Error: %v", err))
-				a.grpcResponseView.SetText(fmt.Sprintf("[red]%v", err))
+				a.grpcResponseView.SetText(fmt.Sprintf("%v", err), true)
 				return
 			}
 
@@ -706,19 +706,19 @@ func (a *App) sendGrpcRequest() {
 			if !ok {
 				log.Printf("ERROR: Unexpected gRPC response type: %T", resp)
 				a.grpcStatusText.SetText(fmt.Sprintf("[red]Internal Error: Unexpected response type %T", resp))
-				a.grpcResponseView.SetText(fmt.Sprintf("Could not format response: %v", resp))
+				a.grpcResponseView.SetText(fmt.Sprintf("Could not format response: %v", resp), true)
 				return
 			}
 			respJSON, err := dynResp.MarshalJSONIndent()
 			if err != nil {
 				log.Printf("ERROR: Failed to marshal gRPC response JSON: %v", err)
 				a.grpcStatusText.SetText(fmt.Sprintf("[red]Error formatting response JSON: %v", err))
-				a.grpcResponseView.SetText(fmt.Sprintf("Could not format response JSON: %v", err))
+				a.grpcResponseView.SetText(fmt.Sprintf("Could not format response JSON: %v", err), true)
 				return
 			}
 			log.Printf("INFO: gRPC call to %s successful. Duration: %v", a.grpcCurrentService, duration)
 			a.grpcStatusText.SetText(fmt.Sprintf("[green]Success![-] | Duration: [cyan]%v[-]", duration))
-			a.grpcResponseView.SetText(string(respJSON)).ScrollToBeginning()
+			a.grpcResponseView.SetText(string(respJSON), true)
 		})
 	}()
 
@@ -1239,7 +1239,7 @@ func (a *App) sendRequest() {
 		a.app.QueueUpdateDraw(func() {
 			if respData.Error != nil {
 				a.statusText.SetText(fmt.Sprintf("[red]Error: %v", respData.Error))
-				a.responseText.SetText(fmt.Sprintf("[red]Error: %v", respData.Error))
+				a.responseText.SetText(fmt.Sprintf("Error: %v", respData.Error), true)
 				return
 			}
 
@@ -1271,7 +1271,7 @@ func (a *App) sendRequest() {
 
 			responseBuilder.WriteString(fmt.Sprintf("\n[yellow]Body:[-]\n%s", string(bodyToDisplay)))
 
-			a.responseText.SetText(responseBuilder.String()).ScrollToBeginning()
+			a.responseText.SetText(responseBuilder.String(), true)
 		})
 	}()
 
@@ -1316,7 +1316,7 @@ func (a *App) clearForm() {
 	a.urlInput.SetText("")
 	a.headersText.SetText("", true)
 	a.bodyText.SetText("", true)
-	a.responseText.SetText("")
+	a.responseText.SetText("", true)
 	a.statusText.SetText("[yellow]Ready to send request")
 	a.methodDrop.SetCurrentOption(0)
 	a.authType.SetCurrentOption(0)
@@ -1456,6 +1456,22 @@ func (a *App) toggleExplorerPanel() {
 	} else {
 		a.contentLayout.ResizeItem(a.explorerPanel, 0, 0)
 	}
+}
+
+// copyTextAreaToClipboard copies the text from a TextArea to the system clipboard.
+// copyTextAreaToClipboard menyalin teks dari TextArea ke clipboard sistem.
+func (a *App) copyTextAreaToClipboard(ta *tview.TextArea) {
+	text := ta.GetText()
+	if text == "" {
+		return
+	}
+
+	if err := clipboard.WriteAll(text); err != nil {
+		log.Printf("ERROR: Failed to copy to clipboard: %v", err)
+		return
+	}
+
+	log.Printf("INFO: Copied %d bytes to clipboard", len(text))
 }
 
 // replaceVariables replaces {{variable}} placeholders in text with values from the active environment.
