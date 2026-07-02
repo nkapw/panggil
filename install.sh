@@ -53,7 +53,7 @@ esac
 info "Detected System: $OS/$ARCH"
 
 info "Fetching the latest version..."
-LATEST_TAG=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+LATEST_TAG=$(curl -sI "https://github.com/$REPO/releases/latest" | grep -i location | sed -n 's/.*tag\/\(.*\)/\1/p' | tr -d '\r')
 LATEST_VERSION=$(echo "$LATEST_TAG" | sed 's/^v//')
 
 
