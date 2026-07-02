@@ -369,6 +369,7 @@ func (a *App) createHeaderBar() *tview.Flex {
 
 		if page == "http" {
 			header.AddItem(httpSendBtn, 0, 1, false).
+				AddItem(genScriptBtn, 0, 1, false).
 				AddItem(clearBtn, 0, 1, false).
 				AddItem(saveBtn, 0, 1, false).
 				AddItem(explorerBtn, 0, 1, false).
@@ -385,6 +386,7 @@ func (a *App) createHeaderBar() *tview.Flex {
 	// Set the initial state for the HTTP mode.
 	// Mengatur state awal untuk mode HTTP.
 	header.AddItem(httpSendBtn, 0, 1, false).
+		AddItem(genScriptBtn, 0, 1, false).
 		AddItem(clearBtn, 0, 1, false).
 		AddItem(saveBtn, 0, 1, false).
 		AddItem(explorerBtn, 0, 1, false).
