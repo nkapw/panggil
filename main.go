@@ -331,6 +331,9 @@ func (a *App) Init() {
 			// Menyalin teks dari widget yang sedang fokus ke clipboard.
 			a.copyToClipboard()
 			return nil
+		case tcell.KeyF4:
+			a.showGenerateScriptModal()
+			return nil
 		case tcell.KeyF10:
 			// Open environment variables modal.
 			// Membuka modal variabel environment.
@@ -355,6 +358,7 @@ func (a *App) createHeaderBar() *tview.Flex {
 	clearBtn := tview.NewButton("Clear (F6)").SetSelectedFunc(a.clearForm)
 	saveBtn := tview.NewButton("Save (F8)").SetSelectedFunc(a.showSaveRequestModal)
 	grpcSendBtn := tview.NewButton("Send (F5)").SetSelectedFunc(a.sendGrpcRequest)
+	genScriptBtn := tview.NewButton("Gen Script (F4)").SetSelectedFunc(a.showGenerateScriptModal)
 	explorerBtn := tview.NewButton("Explorer (Ctrl+E)").SetSelectedFunc(a.toggleExplorerPanel)
 
 	// The header is rebuilt whenever the page changes.
@@ -371,6 +375,7 @@ func (a *App) createHeaderBar() *tview.Flex {
 				AddItem(switchModeBtn, 0, 1, false)
 		} else {
 			header.AddItem(grpcSendBtn, 0, 1, false).
+				AddItem(genScriptBtn, 0, 1, false).
 				AddItem(saveBtn, 0, 1, false).
 				AddItem(explorerBtn, 0, 1, false).
 				AddItem(switchModeBtn, 0, 1, false)
